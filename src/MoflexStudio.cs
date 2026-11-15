@@ -161,13 +161,16 @@ namespace MoflexStudio
         [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
         [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
 
-        // the Mobiclip encoder pops up its own window even when started hidden; keep it out of sight
+        // the Mobiclip encoder pops up its own window even when started hidden: hide each window once when it
+        // appears (it goes to the tray); if the user opens it from the tray it is left alone
+        static readonly HashSet<IntPtr> hiddenOnce = new HashSet<IntPtr>();
+        public static void ResetHidden() { hiddenOnce.Clear(); }
         public static void HideEncoderWindows()
         {
             var pids = new HashSet<int>();
             foreach (var p in Process.GetProcessesByName("MobiclipMulticoreEncoder")) { pids.Add(p.Id); p.Dispose(); }
             if (pids.Count == 0) return;
-            EnumWindows((h, l) => { int pid; GetWindowThreadProcessId(h, out pid); if (pids.Contains(pid) && IsWindowVisible(h)) ShowWindow(h, 0); return true; }, IntPtr.Zero);
+            EnumWindows((h, l) => { int pid; GetWindowThreadProcessId(h, out pid); if (pids.Contains(pid) && IsWindowVisible(h) && hiddenOnce.Add(h)) ShowWindow(h, 0); return true; }, IntPtr.Zero);
         }
     }
 
@@ -1423,7 +1426,7 @@ namespace MoflexStudio
             q.Lvi.SubItems[0].Text = QName(q);
             q.Lvi.SubItems[1].Text = q.Status;
             q.Lvi.ToolTipText = J.S(J.G(q.Job, "source")) + (q.Output != "" ? "\n-> " + q.Output : "") + (q.Error != "" ? "\n" + q.Error : "");
-            q.Lvi.ForeColor = q.Status.StartsWith("Error") ? Color.Firebrick : q.Status.StartsWith("Done") ? Color.SeaGreen : q.Status == "Stopped" ? Color.DarkOrange : SystemColors.WindowText;
+            q.Lvi.ForeColor = q.Status.StartsWith("Error") ? Color.Firebrick : q.Status.StartsWith("Done") ? Color.SeaGreen : q.Status == "Stopped" || q.Status == "Interrupted" ? Color.DarkOrange : SystemColors.WindowText;
         }
 
         QItem SelectedQ() { return lvQueue.SelectedItems.Count > 0 ? (QItem)lvQueue.SelectedItems[0].Tag : null; }
@@ -1481,7 +1484,7 @@ namespace MoflexStudio
                 {
                     var q = new QItem { Job = J.D(J.G(o, "job")), Probe = J.D(J.G(o, "probe")), Status = J.S(J.G(o, "status")), Output = J.S(J.G(o, "output")), Error = J.S(J.G(o, "error")) };
                     if (q.Job == null) continue;
-                    if (q.Status == "" || !(q.Status.StartsWith("Done") || q.Status.StartsWith("Error") || q.Status == "Stopped")) q.Status = "Pending";
+                    if (q.Status == "" || q.Status == "Interrupted" || !(q.Status.StartsWith("Done") || q.Status.StartsWith("Error") || q.Status == "Stopped")) q.Status = "Pending";
                     if (J.B(J.G(o, "was_running"))) Log("Interrupted last time, will start again: " + QName(q));
                     AddQueueItem(q);
                 }
@@ -1504,7 +1507,7 @@ namespace MoflexStudio
         void StartQueue()
         {
             if (queueActive) return;
-            if (!queue.Any(q => q.Status == "Pending" || q.Status == "Stopped" || q.Status.StartsWith("Error")))
+            if (!queue.Any(q => q.Status == "Pending" || q.Status == "Interrupted" || q.Status == "Stopped" || q.Status.StartsWith("Error")))
             { SetStatus("Nothing to do: add something to the queue first."); return; }
             foreach (var q in queue.Where(q => q.Status == "Stopped" || q.Status.StartsWith("Error"))) { q.Status = "Pending"; q.Error = ""; RefreshQ(q); }
             stopRequested = false;
@@ -1514,7 +1517,7 @@ namespace MoflexStudio
 
         void RunNext()
         {
-            var q = queue.FirstOrDefault(x => x.Status == "Pending");
+            var q = queue.FirstOrDefault(x => x.Status == "Pending" || x.Status == "Interrupted");
             if (q == null || stopRequested)
             {
                 running = null; SetRunningUi(false);
@@ -1550,13 +1553,14 @@ namespace MoflexStudio
                 if (stopRequested) { q.Status = "Stopped"; }
                 else if (!q.Status.StartsWith("Done"))
                 {
-                    q.Status = "Error"; q.Error = lastError ?? ("backend exited with code " + code);
-                    Log("! " + q.Error);
+                    if (lastError != null) { q.Status = "Error"; q.Error = lastError; Log("! " + q.Error); }
+                    else { q.Status = "Interrupted"; q.Error = ""; Log("! interrupted (the backend was stopped from outside, exit code " + code + "); it will run again on Start"); }
                 }
                 RefreshQ(q); SaveQueue();
                 RunNext();
             });
             };
+            Native.ResetHidden();
             try { p.Start(); Native.KillWithApp(p); proc = p; p.BeginOutputReadLine(); p.BeginErrorReadLine(); }
             catch (Exception ex) { q.Status = "Error"; q.Error = ex.Message; RefreshQ(q); Log("! " + ex.Message); running = null; SetRunningUi(false); }
         }

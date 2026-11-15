@@ -367,21 +367,15 @@ def ffmpeg_progress(cmd, duration, stage):
         raise RuntimeError(f'{stage} failed: ' + ''.join(errs)[-600:].strip())
 
 def make_avi(job, info, layout, avi):
+    """video only: with an audio stream the Mobiclip encoder's final write runs single-threaded at
+    ~1.7x realtime (45 min for a movie); without one the whole encode takes minutes. Track 1 is
+    added afterwards by assemble() (it replaced the encoder's audio with the normalised one anyway)."""
     cmd = [FFMPEG, '-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-nostats',
            '-progress', 'pipe:1', '-i', job['source']]
-    main = (job.get('audio') or {}).get('main') or {}
-    if 'stream' in main:
-        f = main.get('file') or job['source']
-        off = float(main.get('offset') or 0)
-        cmd += (['-itsoffset', f'{off:.3f}'] if off else []) + ['-i', f]
-        amap = ['-map', f"1:{main['stream']}"]
-    else:
-        cmd += ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo']; amap = ['-map', '1:a', '-shortest']
-    cmd += ['-filter_complex', video_filter(info['video'], layout, job['output'], S['max_fps']), '-map', '[v]'] + amap
+    cmd += ['-filter_complex', video_filter(info['video'], layout, job['output'], S['max_fps']), '-map', '[v]']
     if info['duration']:
         cmd += ['-t', f"{info['duration']:.3f}"]
-    cmd += ['-sn', '-dn', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0',
-            '-c:a', 'pcm_s16le', '-ac', '2', '-ar', '44100', avi]
+    cmd += ['-an', '-sn', '-dn', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', avi]
     ffmpeg_progress(cmd, info['duration'], 'avi')
 
 # ------------------------------------------------------------------ stage 2: Mobiclip encoder
@@ -588,6 +582,13 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
         emit('progress', stage='super', pct=5, note='preparing audio track 1')
         wav = audio_wav(main, default_audio_file, work, 'main')
         lang_main = lang_main or 'eng'
+    elif job.get('_video_only'):
+        # freshly encoded from a silent source: every moflex gets an audio track, so add silence
+        wav = os.path.join(work, 'audio.silent.wav')
+        r = run_quiet([FFMPEG, '-y', '-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                       '-t', f"{float(job.get('_duration') or 1):.3f}", '-c:a', 'pcm_s16le', wav])
+        if r.returncode != 0:
+            raise RuntimeError('could not make the silent audio track: ' + r.stderr.strip()[:300])
     if wav:
         base2 = os.path.join(work, 'base2.moflex')
         r = run_quiet([sys.executable, '-u', os.path.join(S['tools_dir'], 'moflex_addstreams.py'),
@@ -729,6 +730,8 @@ def run_job(jobfile):
             emit('stage', stage='moflex', index=2, total=3,
                  text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
             enc = make_moflex(job, avi, work)
+            job['_video_only'] = True                        # the encoder got no audio; assemble adds track 1
+            job['_duration'] = info['duration']
             os.remove(avi)                                   # only the encoder needed it
             moflex_in, existing = enc, read_trailer(enc)
             n_stage = 3
