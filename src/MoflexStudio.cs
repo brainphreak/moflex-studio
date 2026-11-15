@@ -9,6 +9,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -120,6 +121,53 @@ namespace MoflexStudio
                     return J.Parse(o);
                 }
             });
+        }
+    }
+
+    // ------------------------------------------------------------------ Windows helpers
+    static class Native
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr a, string name);
+        [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int len);
+        [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+        [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+        [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public ulong a, b, c, d, e, f; }
+        [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        { public JOBOBJECT_BASIC_LIMIT_INFORMATION Basic; public IO_COUNTERS Io; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }
+        static IntPtr job = IntPtr.Zero;
+
+        // every process the backend starts (ffmpeg, RunAsDate, the encoder) inherits the job; Windows kills
+        // them all when this app exits for any reason, including a crash
+        public static void KillWithApp(Process p)
+        {
+            try
+            {
+                if (job == IntPtr.Zero)
+                {
+                    job = CreateJobObject(IntPtr.Zero, null);
+                    var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                    info.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    SetInformationJobObject(job, 9, ref info, Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)));
+                }
+                AssignProcessToJobObject(job, p.Handle);
+            }
+            catch { }
+        }
+
+        delegate bool EnumProc(IntPtr h, IntPtr l);
+        [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+        [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+
+        // the Mobiclip encoder pops up its own window even when started hidden; keep it out of sight
+        public static void HideEncoderWindows()
+        {
+            var pids = new HashSet<int>();
+            foreach (var p in Process.GetProcessesByName("MobiclipMulticoreEncoder")) { pids.Add(p.Id); p.Dispose(); }
+            if (pids.Count == 0) return;
+            EnumWindows((h, l) => { int pid; GetWindowThreadProcessId(h, out pid); if (pids.Contains(pid) && IsWindowVisible(h)) ShowWindow(h, 0); return true; }, IntPtr.Zero);
         }
     }
 
@@ -357,6 +405,7 @@ namespace MoflexStudio
             LoadQueue();
             Shown += async delegate
             {
+                CleanStaleWork();
                 await CheckTools(true);
                 // files dropped on the exe: one -> editor, several -> queue; --queue forces queueing, --start runs the queue
                 var args = Environment.GetCommandLineArgs().Skip(1).ToList();
@@ -593,6 +642,28 @@ namespace MoflexStudio
         }
 
         void SetStatus(string s) { lblStatus.Text = s ?? ""; }
+
+        // work folders left behind by a crash or power cut (only when no other copy of the app is running)
+        void CleanStaleWork()
+        {
+            try
+            {
+                if (Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName).Length > 1) return;
+                long freed = 0;
+                foreach (var d in Directory.GetDirectories(Path.GetTempPath(), "moflex_studio_*"))
+                {
+                    try
+                    {
+                        freed += new DirectoryInfo(d).GetFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
+                        Directory.Delete(d, true);
+                    }
+                    catch { }
+                }
+                foreach (var f in Directory.GetFiles(Path.GetTempPath(), "moflex_studio_*")) try { File.Delete(f); } catch { }
+                if (freed > 0) Log(string.Format("Removed {0:0.0} GB of leftover work files from an earlier run.", freed / 1073741824.0));
+            }
+            catch { }
+        }
 
         void HookDrop(Control c)
         {
@@ -1395,7 +1466,7 @@ namespace MoflexStudio
         {
             try
             {
-                var arr = queue.Select(q => (object)new Dict { { "job", q.Job }, { "probe", q.Probe }, { "status", q == running ? "Pending" : q.Status }, { "output", q.Output }, { "error", q.Error } }).ToArray();
+                var arr = queue.Select(q => (object)new Dict { { "job", q.Job }, { "probe", q.Probe }, { "status", q == running ? "Pending" : q.Status }, { "was_running", q == running }, { "output", q.Output }, { "error", q.Error } }).ToArray();
                 File.WriteAllText(queuePath, J.Dump(arr), new UTF8Encoding(false));
             }
             catch { }
@@ -1411,6 +1482,7 @@ namespace MoflexStudio
                     var q = new QItem { Job = J.D(J.G(o, "job")), Probe = J.D(J.G(o, "probe")), Status = J.S(J.G(o, "status")), Output = J.S(J.G(o, "output")), Error = J.S(J.G(o, "error")) };
                     if (q.Job == null) continue;
                     if (q.Status == "" || !(q.Status.StartsWith("Done") || q.Status.StartsWith("Error") || q.Status == "Stopped")) q.Status = "Pending";
+                    if (J.B(J.G(o, "was_running"))) Log("Interrupted last time, will start again: " + QName(q));
                     AddQueueItem(q);
                 }
             }
@@ -1453,7 +1525,7 @@ namespace MoflexStudio
                 if (!stopRequested) FlashWindow();
                 return;
             }
-            running = q; q.Status = "Starting"; q.Error = ""; RefreshQ(q);
+            running = q; q.Status = "Starting"; q.Error = ""; RefreshQ(q); SaveQueue();
             Log("=== " + QName(q));
             string jf = Path.Combine(Path.GetTempPath(), "moflex_studio_job_" + Guid.NewGuid().ToString("N") + ".json");
             File.WriteAllText(jf, J.Dump(q.Job), new UTF8Encoding(false));
@@ -1485,7 +1557,7 @@ namespace MoflexStudio
                 RunNext();
             });
             };
-            try { p.Start(); proc = p; p.BeginOutputReadLine(); p.BeginErrorReadLine(); }
+            try { p.Start(); Native.KillWithApp(p); proc = p; p.BeginOutputReadLine(); p.BeginErrorReadLine(); }
             catch (Exception ex) { q.Status = "Error"; q.Error = ex.Message; RefreshQ(q); Log("! " + ex.Message); running = null; SetRunningUi(false); }
         }
 
@@ -1524,6 +1596,7 @@ namespace MoflexStudio
                         pbStage.Value = Math.Max(0, v);
                         lblDetail.Text = string.Format("{0}  {1} elapsed, roughly {2} expected", J.S(J.G(ev, "note")), Clock(el), Clock(est));
                         q.Status = "2/3 Encoding " + Clock(el);
+                        try { Native.HideEncoderWindows(); } catch { }
                     }
                     else if (pct != null)
                     {
@@ -1594,12 +1667,36 @@ namespace MoflexStudio
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool FlashWindow(IntPtr h, bool invert);
         void FlashWindow() { try { if (!ContainsFocus) FlashWindow(Handle, true); } catch { } }
 
+        static MainForm instance;
+
+        static void Report(Exception ex, bool fatal)
+        {
+            try
+            {
+                string log = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "app", "error.log");
+                File.AppendAllText(log, string.Format("==== {0:yyyy-MM-dd HH:mm:ss}{1}\r\n{2}\r\n", DateTime.Now, fatal ? "  (fatal)" : "", ex), new UTF8Encoding(false));
+            }
+            catch { }
+            try
+            {
+                var f = instance;
+                if (f != null && !f.IsDisposed)
+                    f.SetStatus("Something went wrong (" + ex.GetType().Name + ": " + ex.Message + "). Details are in app\\error.log. The queue keeps running.");
+            }
+            catch { }
+        }
+
         [STAThread]
         static void Main()
         {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) => Report(e.Exception, false);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => Report(e.ExceptionObject as Exception ?? new Exception("unknown error"), true);
+            TaskScheduler.UnobservedTaskException += (s, e) => { Report(e.Exception, false); e.SetObserved(); };
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            instance = new MainForm();
+            Application.Run(instance);
         }
     }
 }
