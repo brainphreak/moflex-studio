@@ -1,8 +1,9 @@
 # Moflex Studio
 
-An all-in-one **SUPER MOFLEX** builder for Windows. Give it a video file, a moflex or a SUPER MOFLEX. It produces a 3DS-ready moflex with track 1 audio, an optional track 2, up to 16 subtitle tracks, metadata and a poster. It uses the **official Mobiclip encoder**, so the picture quality matches Nintendo's own tools.
+An all-in-one **SUPER MOFLEX** builder for Windows. Give it a video file, a moflex or a SUPER MOFLEX. It produces a 3DS-ready moflex with track 1 audio, an optional track 2, up to 16 subtitle tracks, metadata and a poster.
 
-This repo is **private**: it contains the Mobiclip encoder and the license.
+Special thanks to lenn3 for discovering that raw AVI without audio prevents the moflex encoder hang at 99%, not things are super fast
+
 
 ![Moflex Studio converting a movie](docs/queue.png)
 
@@ -74,7 +75,7 @@ Shows what was detected:
 |---|---|
 | **Source layout** | **Auto** (detected), **2D**, **Half SBS** (each eye squeezed to half width) or **Full SBS** (each eye full width). Auto uses the shape of the picture and words like "SBS" in the file name. Set it yourself if Auto guesses wrong. |
 | **Output** | **3D** (two 400x240 eyes) or **2D** (one 400x240 picture). 2D output from an SBS source uses the left eye. For a moflex input, this only sets the 3D flag the player reads. |
-| **Bitrate** | Mobiclip video bitrate in kbps. 1400 is the default (the official 3D setting). |
+| **Bitrate** | video bitrate in kbps. 1400 is the default (the official 3D setting). |
 
 The picture is always **letterboxed, never stretched**, so the aspect ratio is kept. Sources above 30 fps are halved (60 → 30).
 
@@ -145,7 +146,7 @@ If you set a poster, a `.jpg` copy of it is saved next to the moflex.
 
 - **TMDB token:** the *API Read Access Token* from <https://www.themoviedb.org/settings/api>. It's stored only in `app\settings.json` and never committed.
 - **Bitrate / Output folder:** defaults for new jobs.
-- **Tools:** shows whether Python, ffmpeg, the Mobiclip encoder, RunAsDate and the license were found. **Download missing tools** fetches Python and ffmpeg again.
+- **Tools:** shows whether Python, ffmpeg, RunAsDate and the license were found. **Download missing tools** fetches Python and ffmpeg again.
 
 ---
 
@@ -173,12 +174,12 @@ For a video file:
 | Stage | What happens | Progress shown |
 |---|---|---|
 | **1/3 AVI** | Decodes the source and writes a lossless 400x240 / 800x240 AVI | real %, time left, speed |
-| **2/3 Encoding** | Official Mobiclip encoder, 2 passes | estimate (the encoder reports nothing until it's done) |
+| **2/3 Encoding** |  2 passes | estimate (the encoder reports nothing until it's done) |
 | **3/3 Building** | Audio normalize and convert, subtitles, poster, info, trailer | per step |
 
 A moflex input only goes through **Building**.
 
-During the encode, the **Mobiclip window** starts hidden in the system tray. Click its tray icon to watch it if you like. Don't close it, because that ends the encode.
+During the encode, the moflex encoder starts hidden in the system tray. Click its tray icon to watch it if you like. Don't close it, because that ends the encode.
 
 ---
 
@@ -189,7 +190,7 @@ Measured on the server (32 threads), for a 76-minute 1080p HEVC full-SBS movie w
 | Stage | Time |
 |---|---|
 | Lossless AVI | ~5½ min |
-| Mobiclip encode (3D, 1400 kbps, 2 passes) | ~4½ min |
+| Moflex encode (3D, 1400 kbps, 2 passes) | ~4½ min |
 | Building (two 76-min tracks normalized and converted, poster, info) | ~7 min |
 | **Total** | **~17 min** |
 
@@ -210,7 +211,7 @@ Editing an existing moflex takes a few seconds. Converting a new track 2 takes a
 | Problem | Fix |
 |---|---|
 | "Python / ffmpeg missing" | **Settings → Download missing tools**. You need internet access the first time. |
-| "the Mobiclip encoder is already open" | Close the Mobiclip GUI (or a stuck `MobiclipMulticoreEncoder.exe` in Task Manager). Only one encoder can run at a time. |
+| "the moflex encoder is already open" | Close the Moflex Encoder GUI (or a stuck in Task Manager). Only one encoder can run at a time. |
 | "3D output needs a side-by-side source" | The file looks 2D. Set **Video → Source layout** to HSBS or FSBS, or choose 2D output. |
 | A subtitle stream shows "(image: needs OCR)" | It's PGS/VobSub. Convert it to `.srt` with an OCR tool and add the file instead. |
 | "subtitle N is ... bytes, over 1 MiB" | Split or clean the subtitle file. The player won't load a track over 1 MB. |
@@ -245,8 +246,8 @@ The job format is documented at the top of `app\moflex_studio.py`.
 
 1. **Video file:**
    1. ffmpeg makes a **lossless, video-only AVI**: x264 `qp 0`, each eye letterboxed into 400x240 (3D is 800x240 side by side).
-   2. The official **Mobiclip Multicore Encoder 2.0.5** runs headless from a one-job queue (`-q`), launched through **RunAsDate** with a 2022 clock because the license has expired.
-   3. The AVI has no audio on purpose. With audio in it, Mobiclip's final write runs single-threaded and takes about 45 minutes for a movie; without audio it takes minutes. The audio is added in the next step.
+   2. The official moflex encoder runs headless from a one-job queue (`-q`), launched through **RunAsDate** with a 2022 clock because the license has expired.
+   3. The AVI has no audio on purpose. With audio in it, Moflex encoders final write runs single-threaded and takes about 45 minutes for a movie; without audio it takes minutes. The audio is added in the next step. (thanks for lenn3 for this discovery)
 2. **Assemble** (every input):
    1. Track 1 is normalized and converted to 3DS ADPCM, then written into the moflex in-band.
    2. A new **CSXTRA trailer** is written:
@@ -266,8 +267,8 @@ The job format is documented at the top of `app\moflex_studio.py`.
 Moflex Studio.exe        GUI (built from src\)
 app\moflex_studio.py     backend
 app\tools\               shared SUPER MOFLEX helpers (copies; ./sync_tools.sh refreshes them from moflex-encoder)
-app\templates\           Mobiclip one-job queue templates (2D, 3D)
-app\encoder\             Mobiclip Multicore Encoder 2.0.5 (portable copy)
+app\templates\           Moflex encoder one-job queue templates (2D, 3D)
+app\encoder\             Moflex encoder (portable copy)
 app\RunAsDate.exe        runs the encoder with a 2022 clock
 app\User_CTR.lic         the encoder license
 app\python\  app\bin\    downloaded on first run (not in git)
