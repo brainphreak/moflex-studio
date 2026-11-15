@@ -155,6 +155,41 @@ namespace MoflexStudio
             catch { }
         }
 
+        [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr ret);
+        [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
+        [DllImport("ntdll.dll")] static extern int NtResumeProcess(IntPtr h);
+
+        // every process currently in the job: the backend, ffmpeg, RunAsDate, the encoder
+        static List<int> JobPids()
+        {
+            var pids = new List<int>();
+            if (job == IntPtr.Zero) return pids;
+            int size = 8 + IntPtr.Size * 512;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (QueryInformationJobObject(job, 3, buf, size, IntPtr.Zero))     // JobObjectBasicProcessIdList
+                {
+                    int n = Marshal.ReadInt32(buf, 4);
+                    for (int i = 0; i < n; i++) pids.Add((int)Marshal.ReadIntPtr(buf, 8 + i * IntPtr.Size).ToInt64());
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+            return pids;
+        }
+
+        // pause = freeze every process of the running job where it is; resume continues exactly there
+        public static int SetJobSuspended(bool suspend)
+        {
+            int n = 0;
+            foreach (int pid in JobPids())
+            {
+                try { using (var p = Process.GetProcessById(pid)) { if (suspend) NtSuspendProcess(p.Handle); else NtResumeProcess(p.Handle); n++; } }
+                catch { }
+            }
+            return n;
+        }
+
         delegate bool EnumProc(IntPtr h, IntPtr l);
         [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
         [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
@@ -367,7 +402,8 @@ namespace MoflexStudio
         Dict probe;                         // the source loaded in the editor
         QItem editing;                      // queue item being edited (null = new)
         List<QItem> queue = new List<QItem>();
-        QItem running; Process proc; bool stopRequested, queueActive;
+        QItem running; Process proc; bool stopRequested, queueActive, paused;
+        string currentWork = "";
         double jobDuration; DateTime stageStart;
         string currentArtMode = "none", artUrl = "", artFile = "";
         string origShowDesc = "";
@@ -385,7 +421,7 @@ namespace MoflexStudio
         TextBox txtToken, txtDefOut; NumericUpDown numDefBitrate; Label lblTools; Button btnDownload;
         Button btnAdd, btnClear, btnCancelEdit; Label lblEditing;
         // queue + progress
-        ListView lvQueue; Button btnStart, btnStop, btnEdit, btnRemove, btnUp, btnDown, btnClearDone;
+        ListView lvQueue; Button btnStart, btnPause, btnStop, btnEdit, btnRemove, btnUp, btnDown, btnClearDone;
         Label lblStage, lblDetail, lblStatus; ProgressBar pbStage, pbTools; TextBox txtLog;
         ToolTip tips = new ToolTip();
 
@@ -615,8 +651,9 @@ namespace MoflexStudio
             btnUp = Add(this, new Button { Text = "Up", Left = 764, Top = 304, Width = 48 });
             btnDown = Add(this, new Button { Text = "Down", Left = 816, Top = 304, Width = 52 });
             btnClearDone = Add(this, new Button { Text = "Clear finished", Left = 872, Top = 304, Width = 104 });
-            btnStart = Add(this, new Button { Text = "Start queue", Left = 628, Top = 336, Width = 170, Height = 32, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) });
-            btnStop = Add(this, new Button { Text = "Stop", Left = 804, Top = 336, Width = 172, Height = 32, Enabled = false });
+            btnStart = Add(this, new Button { Text = "Start queue", Left = 628, Top = 336, Width = 132, Height = 32, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) });
+            btnPause = Add(this, new Button { Text = "Pause", Left = 766, Top = 336, Width = 102, Height = 32, Enabled = false });
+            btnStop = Add(this, new Button { Text = "Stop", Left = 874, Top = 336, Width = 102, Height = 32, Enabled = false });
             lblStage = Add(this, new Label { Left = 628, Top = 376, Width = 348, Height = 18, Font = new Font("Segoe UI", 9f, FontStyle.Bold), AutoEllipsis = true, Text = "Idle" });
             pbStage = Add(this, new ProgressBar { Left = 628, Top = 396, Width = 348, Height = 18 });
             lblDetail = Note(this, "", 628, 418, 348, 18); lblDetail.AutoEllipsis = true;
@@ -638,6 +675,7 @@ namespace MoflexStudio
             };
             btnStart.Click += delegate { StartQueue(); };
             btnStop.Click += delegate { StopQueue(); };
+            btnPause.Click += delegate { TogglePause(); };
 
             // ---- status bar
             lblStatus = Add(this, new Label { Left = 8, Top = 578, Width = 780, Height = 18, AutoEllipsis = true, ForeColor = SystemColors.GrayText });
@@ -1426,7 +1464,7 @@ namespace MoflexStudio
             q.Lvi.SubItems[0].Text = QName(q);
             q.Lvi.SubItems[1].Text = q.Status;
             q.Lvi.ToolTipText = J.S(J.G(q.Job, "source")) + (q.Output != "" ? "\n-> " + q.Output : "") + (q.Error != "" ? "\n" + q.Error : "");
-            q.Lvi.ForeColor = q.Status.StartsWith("Error") ? Color.Firebrick : q.Status.StartsWith("Done") ? Color.SeaGreen : q.Status == "Stopped" || q.Status == "Interrupted" ? Color.DarkOrange : SystemColors.WindowText;
+            q.Lvi.ForeColor = q.Status.StartsWith("Error") ? Color.Firebrick : q.Status.StartsWith("Done") ? Color.SeaGreen : q.Status == "Stopped" || q.Status == "Interrupted" || q.Status == "Paused" ? Color.DarkOrange : SystemColors.WindowText;
         }
 
         QItem SelectedQ() { return lvQueue.SelectedItems.Count > 0 ? (QItem)lvQueue.SelectedItems[0].Tag : null; }
@@ -1501,7 +1539,8 @@ namespace MoflexStudio
         void SetRunningUi(bool on)
         {
             queueActive = on;
-            btnStart.Enabled = !on && toolsReady; btnStop.Enabled = on;
+            btnStart.Enabled = !on && toolsReady; btnStop.Enabled = on; btnPause.Enabled = on;
+            if (!on) { paused = false; btnPause.Text = "Pause"; }
         }
 
         void StartQueue()
@@ -1556,6 +1595,8 @@ namespace MoflexStudio
                     if (lastError != null) { q.Status = "Error"; q.Error = lastError; Log("! " + q.Error); }
                     else { q.Status = "Interrupted"; q.Error = ""; Log("! interrupted (the backend was stopped from outside, exit code " + code + "); it will run again on Start"); }
                 }
+                if (!q.Status.StartsWith("Done")) DeleteWork(currentWork);
+                currentWork = "";
                 RefreshQ(q); SaveQueue();
                 RunNext();
             });
@@ -1579,6 +1620,7 @@ namespace MoflexStudio
             {
                 case "start":
                     jobDuration = J.F(J.G(ev, "duration"));
+                    currentWork = J.S(J.G(ev, "work"));
                     break;
                 case "stage":
                     stageStart = DateTime.Now;
@@ -1589,6 +1631,7 @@ namespace MoflexStudio
                     break;
                 case "progress":
                 {
+                    if (paused) break;
                     string st = J.S(J.G(ev, "stage"));
                     object pct = J.G(ev, "pct");
                     double el = J.F(J.G(ev, "elapsed"));
@@ -1637,8 +1680,46 @@ namespace MoflexStudio
 
         static string StageShort(string s) { return s == "avi" ? "AVI" : s == "moflex" ? "Encoding" : s == "super" ? "Building" : s; }
 
+        string stageBeforePause = "", statusBeforePause = "";
+        void TogglePause()
+        {
+            if (proc == null || running == null) return;
+            if (!paused)
+            {
+                int n = Native.SetJobSuspended(true);
+                if (n == 0) { SetStatus("Nothing to pause right now."); return; }
+                paused = true; btnPause.Text = "Resume";
+                stageBeforePause = lblStage.Text; statusBeforePause = running.Status; lblStage.Text = "Paused  (" + stageBeforePause + ")";
+                running.Status = "Paused"; RefreshQ(running);
+                Log("paused");
+            }
+            else
+            {
+                Native.SetJobSuspended(false);
+                paused = false; btnPause.Text = "Pause";
+                lblStage.Text = stageBeforePause; running.Status = statusBeforePause; RefreshQ(running);
+                Log("resumed");
+            }
+        }
+
+        // the job's temp folder (lossless AVI etc.); the backend removes it itself unless it was killed
+        void DeleteWork(string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !Path.GetFileName(dir).StartsWith("moflex_studio_")) return;
+            Task.Run(() =>
+            {
+                for (int i = 0; i < 20 && Directory.Exists(dir); i++)
+                {
+                    try { Directory.Delete(dir, true); } catch { System.Threading.Thread.Sleep(500); }
+                }
+                bool gone = !Directory.Exists(dir);
+                UI(() => Log(gone ? "removed the job's temp files" : "could not remove " + dir + " (it is cleaned up on the next start)"));
+            });
+        }
+
         void StopQueue()
         {
+            if (paused) { Native.SetJobSuspended(false); paused = false; btnPause.Text = "Pause"; }
             stopRequested = true;
             btnStop.Enabled = false;
             if (proc != null)

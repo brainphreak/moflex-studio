@@ -418,11 +418,12 @@ def make_moflex(job, avi, work):
         cmd = [exe, '-q', qf]
     si = subprocess.STARTUPINFO(); si.dwFlags |= 1; si.wShowWindow = 0      # SW_HIDE
     subprocess.Popen(cmd, cwd=work, startupinfo=si, creationflags=NO_WINDOW)
-    seen = False; t0 = time.time()
+    seen = False; t0 = time.time(); polls = 0
     while True:
+        polls += 1                     # counts working seconds, so a Pause in the GUI is not mistaken for a hang
         if encoder_running():
             seen = True
-        elif seen or time.time() - t0 > 45:
+        elif seen or polls > 45:
             break
         out = [x for x in os.listdir(outdir) if x.lower().endswith('.moflex')]
         emit('progress', stage='moflex', pct=None, elapsed=round(time.time() - t0, 1),
@@ -496,10 +497,29 @@ def audio_wav(sel, default_file, work, tag):
     p = os.path.join(work, f'audio.{tag}.wav')
     return msm.extract_normalized(f, int(sel['stream']), p, tag, float(sel.get('offset') or 0))
 
+def load_wav(path):
+    """16-bit PCM WAV -> (array('h'), channels, rate); read in chunks (a movie is ~400M samples)"""
+    import array, wave
+    with wave.open(path, 'rb') as w:
+        if w.getsampwidth() != 2:
+            raise RuntimeError('need 16-bit PCM')
+        chn, rate = w.getnchannels(), w.getframerate()
+        pcm = array.array('h')
+        left = w.getnframes()
+        while left > 0:
+            b = w.readframes(min(1 << 20, left))
+            if not b:
+                break
+            pcm.frombytes(b)
+            left -= len(b) // (2 * chn)
+    if sys.byteorder == 'big':
+        pcm.byteswap()
+    return pcm, chn, rate
+
 def adpcm_section(wav, label):
     import array
     _, mas, _ = tools()
-    pcm, chn, rate = mas.load_wav(wav)
+    pcm, chn, rate = load_wav(wav)
     total = len(pcm) // chn
     pad = (-total) % mas.PKT_SAMPLES
     pcm.extend(array.array('h', bytes(2 * pad * chn)))
@@ -722,7 +742,7 @@ def run_job(jobfile):
             if 'main' not in aud and info['audio']:
                 aud['main'] = {'stream': info['audio'][0]['index'], 'lang': (info['audio'][0]['lang'] or 'eng')[:3]}
             stages = ['avi', 'moflex', 'super']
-            emit('start', source=src, kind=kind, layout=layout, output=job['output'], stages=stages,
+            emit('start', source=src, kind=kind, work=work, layout=layout, output=job['output'], stages=stages,
                  duration=info['duration'])
             emit('stage', stage='avi', index=1, total=3, text='Converting to lossless AVI')
             avi = os.path.join(work, 'moflex_job.avi')
@@ -738,7 +758,7 @@ def run_job(jobfile):
         else:
             is3d = (job.get('output') or ('3d' if info['moflex']['is3d'] else '2d')).lower() == '3d'
             stages = ['super']
-            emit('start', source=src, kind=kind, output='3d' if is3d else '2d', stages=stages,
+            emit('start', source=src, kind=kind, work=work, output='3d' if is3d else '2d', stages=stages,
                  duration=info['duration'])
             moflex_in, existing = src, read_trailer(src)
             n_stage = 1
