@@ -1,0 +1,9 @@
+# downloaded on first run
+app/python/
+app/bin/
+# local only (TMDB token, queue)
+app/settings.json
+app/queue.json
+__pycache__/
+*.pyc
+.DS_Store

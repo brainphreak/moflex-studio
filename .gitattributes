@@ -1,0 +1,6 @@
+*.bat   text eol=crlf
+*.queue -text
+*.exe   binary
+*.dll   binary
+*.lic   binary
+*.ico   binary

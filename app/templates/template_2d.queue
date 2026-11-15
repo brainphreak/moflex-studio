@@ -1,0 +1,221 @@
+[
+   {
+      "Child" : [
+         {
+            "Child" : [
+               {
+                  "Child" : [
+                     {
+                        "Duration" : "",
+                        "Fps" : -1,
+                        "Progress" : -1,
+                        "Status" : 0,
+                        "TimeEnded" : "",
+                        "TimeStarted" : ""
+                     },
+                     {
+                        "Duration" : "",
+                        "Fps" : -1,
+                        "Progress" : -1,
+                        "Status" : 0,
+                        "TimeEnded" : "",
+                        "TimeStarted" : ""
+                     }
+                  ],
+                  "Duration" : "",
+                  "Fps" : -1,
+                  "InputFilename" : "__INPUT_FILE__",
+                  "Progress" : -1,
+                  "Status" : 0,
+                  "TimeEnded" : "",
+                  "TimeStarted" : ""
+               }
+            ],
+            "Duration" : "",
+            "Fps" : -1,
+            "GraphFlow" : [
+               "VideoFiles",
+               "CropResize",
+               "ConvertAudio",
+               "MobiclipEncoder"
+            ],
+            "Progress" : -1,
+            "Status" : 0,
+            "TimeEnded" : "",
+            "TimeStarted" : ""
+         }
+      ],
+      "Duration" : "",
+      "Fps" : -1,
+      "Name" : "Moflex Maker 2D",
+      "Progress" : -1,
+      "Project" : [
+         {
+            "Data" : {
+               "Directory" : "__INPUT_DIR__",
+               "Filenames" : [
+                  "__INPUT_NAME__"
+               ],
+               "Index" : 0,
+               "WinX" : -1,
+               "WinY" : -1
+            },
+            "Filter" : "VideoFiles",
+            "Next" : [
+               {
+                  "Pin" : 0,
+                  "Uid" : 1549049986464
+               }
+            ],
+            "Uid" : 1549053853584,
+            "x" : 37,
+            "y" : 76
+         },
+         {
+            "Data" : {
+               "AspectRatio" : 0.0,
+               "ResizeMode" : 3,
+               "ResizeType" : 2,
+               "UserCrop" : {
+                  "Down" : 0,
+                  "Left" : 0,
+                  "Right" : 0,
+                  "Up" : 0
+               },
+               "UserCropEnabled" : false,
+               "UserResize" : {
+                  "Height" : 240,
+                  "Width" : 400
+               },
+               "UserResizeEnabled" : true,
+               "WinX" : -1,
+               "WinY" : -1
+            },
+            "Filter" : "CropResize",
+            "Next" : [
+               {
+                  "Pin" : 0,
+                  "Uid" : 1549049944864
+               }
+            ],
+            "Uid" : 1549049986464,
+            "x" : 354,
+            "y" : 158
+         },
+         {
+            "Data" : {
+               "ChannelCount" : 2,
+               "SampleRate" : 6,
+               "SampleRateCustom" : 44100,
+               "WinX" : -1,
+               "WinY" : -1
+            },
+            "Filter" : "ConvertAudio",
+            "Next" : [
+               {
+                  "Pin" : 0,
+                  "Uid" : 1549054307184
+               }
+            ],
+            "Uid" : 1549049944864,
+            "x" : 502,
+            "y" : 210
+         },
+         {
+            "Data" : {
+               "DisplayWarningMessage" : false,
+               "Draft" : false,
+               "EnableAviSave" : false,
+               "EstimatedSizeMode" : 0,
+               "FilenameBitrate" : false,
+               "FilenameDraft" : false,
+               "FilenameFps" : false,
+               "FilenameOverwrite" : true,
+               "FilenamePass" : false,
+               "FilenameResolution" : false,
+               "Input" : [
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : __BITRATE__,
+                     "PassFilename" : "__PASS0__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS1__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS2__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS3__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS4__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS5__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS6__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  },
+                  {
+                     "AudioCompression" : 1,
+                     "Bitrate" : 0,
+                     "PassFilename" : "__PASS7__",
+                     "StreamType" : 0,
+                     "Timeline" : false
+                  }
+               ],
+               "KeyframeInterval" : 30.0,
+               "MaxFileSize" : 128.0,
+               "OutputDecoded" : true,
+               "OutputDirectory" : "__OUTPUT_DIR__",
+               "OutputFilename" : "",
+               "OutputFormat" : 0,
+               "OutputLogInfo" : false,
+               "PreloadTime" : 0.0,
+               "Qmax" : 48,
+               "Qmin" : 12,
+               "SynchronizeTimelines" : true,
+               "TargetPlatform" : 0,
+               "TwoPass" : true,
+               "Uid" : "9a3bc12e-4426-40ab-b4bb-2f33ccd34efd",
+               "WinX" : -1,
+               "WinY" : -1
+            },
+            "Filter" : "MobiclipEncoder",
+            "Uid" : 1549054307184,
+            "x" : 638,
+            "y" : 270
+         }
+      ],
+      "Status" : 0,
+      "TimeEnded" : "",
+      "TimeStarted" : ""
+   }
+]
