@@ -2,7 +2,7 @@
 
 An all-in-one **SUPER MOFLEX** builder for Windows. Give it a video file, a moflex or a SUPER MOFLEX. It produces a 3DS-ready moflex with track 1 audio, an optional track 2, up to 16 subtitle tracks, metadata and a poster.
 
-Special thanks to lenn3 for discovering that raw AVI without audio prevents the moflex encoder hang at 99%, not things are super fast
+Special thanks to lenn3 for discovering that raw AVI without audio prevents the moflex encoder hang at 99%, now things are super fast
 
 
 ![Moflex Studio converting a movie](docs/queue.png)
