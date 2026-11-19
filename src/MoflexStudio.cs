@@ -248,6 +248,32 @@ namespace MoflexStudio
 
         string Mode { get { var it = cmbMode.SelectedItem as Item; return it == null ? "" : (string)it.Tag; } }
 
+        // audio streams of other files offered as choices (a version's own tracks): "vs:<k>" -> (file, stream)
+        List<KeyValuePair<string, object>> fileStreams = new List<KeyValuePair<string, object>>();
+
+        public void AddFileStreams(string path, string what, Dict pr)
+        {
+            foreach (var a in J.A(J.G(pr, "audio")))
+            {
+                fileStreams.Add(new KeyValuePair<string, object>(path, a));
+                var it = new Item(what + "  " + StreamText(a), "vs:" + (fileStreams.Count - 1));
+                int other = -1;                                  // before "Other file...", which stays last
+                for (int i = 0; i < cmbMode.Items.Count; i++) if ((string)((Item)cmbMode.Items[i]).Tag == "file") other = i;
+                if (other >= 0) cmbMode.Items.Insert(other, it); else cmbMode.Items.Add(it);
+            }
+        }
+
+        public void RemoveFileStreams(string path)
+        {
+            for (int i = cmbMode.Items.Count - 1; i >= 0; i--)
+            {
+                string tg = (string)((Item)cmbMode.Items[i]).Tag;
+                if (tg.StartsWith("vs:") && string.Equals(fileStreams[int.Parse(tg.Substring(3))].Key, path, StringComparison.OrdinalIgnoreCase))
+                    cmbMode.Items.RemoveAt(i);
+            }
+            if (cmbMode.SelectedIndex < 0 && cmbMode.Items.Count > 0) cmbMode.SelectedIndex = 0;
+        }
+
         static string StreamText(object a)
         {
             string t = J.S(J.G(a, "title"));
@@ -257,7 +283,7 @@ namespace MoflexStudio
 
         public void Setup(Dict probe)
         {
-            SourceProbe = probe; otherProbe = null;
+            SourceProbe = probe; otherProbe = null; fileStreams.Clear();
             cmbMode.Items.Clear(); txtFile.Text = ""; cmbStream.Items.Clear(); numOffset.Value = 0; txtLang.Text = "";
             string kind = J.S(J.G(probe, "kind"));
             if (probe == null) { ModeChanged(); return; }
@@ -317,13 +343,15 @@ namespace MoflexStudio
             string m = Mode;
             bool file = m == "file";
             txtFile.Enabled = btnFile.Enabled = cmbStream.Enabled = file;
-            numOffset.Enabled = file || m.StartsWith("src:");
+            numOffset.Enabled = file || m.StartsWith("src:") || m.StartsWith("vs:");
             txtLang.Enabled = m != "none" && m != "silent" && m != "normalize" && !(m == "keep" && !second) && m != "";
             if (m.StartsWith("src:"))
             {
                 var a = FindStream(SourceProbe, int.Parse(m.Substring(4)));
                 txtLang.Text = Lang3(J.S(J.G(a, "lang")));
             }
+            else if (m.StartsWith("vs:"))
+                txtLang.Text = Lang3(J.S(J.G(fileStreams[int.Parse(m.Substring(3))].Value, "lang")));
             else if (m.StartsWith("keep:"))
             {
                 int k = int.Parse(m.Substring(5));
@@ -383,6 +411,11 @@ namespace MoflexStudio
             if (m.StartsWith("keep:")) { d["keep"] = int.Parse(m.Substring(5)); if (lang != "") d["label"] = lang; return d; }
             if (m == "normalize") { d["normalize"] = true; return d; }
             if (m.StartsWith("src:")) { d["file"] = null; d["stream"] = int.Parse(m.Substring(4)); }
+            else if (m.StartsWith("vs:"))
+            {
+                var fs = fileStreams[int.Parse(m.Substring(3))];
+                d["file"] = fs.Key; d["stream"] = J.I(J.G(fs.Value, "index"));
+            }
             else { d["file"] = txtFile.Text; d["stream"] = J.I(J.G(((Item)cmbStream.SelectedItem).Tag, "index")); }
             d["offset"] = (double)numOffset.Value;
             if (lang == "") lang = second ? "alt" : "eng";
@@ -405,7 +438,9 @@ namespace MoflexStudio
             if (J.B(J.G(o, "normalize"))) { SelectMode("normalize"); return; }
             if (!J.Has(o, "stream")) { SelectMode("silent"); return; }
             string f = J.S(J.G(o, "file"));
+            int vsk = fileStreams.FindIndex(fs => string.Equals(fs.Key, f, StringComparison.OrdinalIgnoreCase) && J.I(J.G(fs.Value, "index")) == J.I(J.G(o, "stream")));
             if (f == "") SelectMode("src:" + J.I(J.G(o, "stream")));
+            else if (vsk >= 0) SelectMode("vs:" + vsk);
             else
             {
                 SelectMode("file"); await PickFile(f);
@@ -424,7 +459,7 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "1.3";
+        const string AppVersion = "1.4";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
@@ -562,7 +597,10 @@ namespace MoflexStudio
             {
                 if (lvVer.SelectedItems.Count == 0) return;
                 if (J.B(J.G(lvVer.SelectedItems[0].Tag, "self"))) { SetStatus("This file's own video can't be removed; move another version above it to make that one the main."); return; }
+                string vsrc = J.S(J.G(lvVer.SelectedItems[0].Tag, "source"));
                 lvVer.Items.Remove(lvVer.SelectedItems[0]); RenumberVer();
+                if (vsrc != "" && !lvVer.Items.Cast<ListViewItem>().Any(i => string.Equals(J.S(J.G(i.Tag, "source")), vsrc, StringComparison.OrdinalIgnoreCase)))
+                    ForgetVersionStreams(vsrc);
             };
             bVerUp.Click += delegate { MoveRow(lvVer, -1); }; bVerDn.Click += delegate { MoveRow(lvVer, 1); };
             bVerUpd.Click += delegate { UpdateSelectedVersion(); };
@@ -1287,6 +1325,8 @@ namespace MoflexStudio
             foreach (var vd in vrows) AddVerRow(vd);
             RenumberVer();
             txtVerLabel.Text = ""; cmbVerLayout.SelectedIndex = 0;
+            for (int vi = 0; vi < vrows.Count; vi++)
+                if (J.S(J.G(vrows[vi], "source")) != "") await OfferVersionStreams(J.S(J.G(vrows[vi], "source")), vi + 1, false);
 
             // subtitles
             cmbSubFrom.Items.Clear();
@@ -1467,7 +1507,7 @@ namespace MoflexStudio
             var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")), desc }); lvi.Tag = d; lvVer.Items.Add(lvi);
         }
 
-        void AddVersionFromUi()
+        async void AddVersionFromUi()
         {
             if (probe == null) { SetStatus("Open a source file first."); return; }
             if (lvVer.Items.Count >= MaxVersions + 1) { SetStatus("The player holds 4 versions: the main one plus 3 more."); return; }
@@ -1487,6 +1527,71 @@ namespace MoflexStudio
                 { "desc", Path.GetFileName(f) + (mf ? "  (moflex: used as it is)" : "  (encoded like the main one)") } };
             AddVerRow(row); RenumberVer();
             txtVerLabel.Text = "";
+            await OfferVersionStreams(f, lvVer.Items.Count, true);
+        }
+
+        /* a version file's own audio and text subtitle streams: always offered in the Audio and Subtitles
+         * "add" boxes; with autoAdd, the ones in a language the film doesn't have yet go straight into the
+         * lists (the same timeline, so they line up). They're ordinary tracks: the player's lists are global. */
+        async Task OfferVersionStreams(string f, int row, bool autoAdd)
+        {
+            Dict pr;
+            try { pr = await ProbeDict(f); }
+            catch (Exception ex) { SetStatus("Could not read " + Path.GetFileName(f) + ": " + ex.Message); return; }
+            string what = "Version " + row + " (" + Path.GetFileName(f) + ")";
+            audio2.AddFileStreams(f, what, pr);
+            foreach (var st in J.A(J.G(pr, "subtitles")))
+            {
+                if (J.B(J.G(st, "image"))) continue;
+                string txt = string.Format("{0} stream #{1}: {2} {3} {4}", what, J.I(J.G(st, "index")), J.S(J.G(st, "lang")).ToUpper(), J.S(J.G(st, "codec")), J.S(J.G(st, "title"))).Trim();
+                cmbSubFrom.Items.Insert(Math.Max(0, cmbSubFrom.Items.Count - 2), new Item(txt, new Dict { { "file", f }, { "stream", J.I(J.G(st, "index")) },
+                    { "label", SubLabel(J.S(J.G(st, "lang")), J.S(J.G(st, "title")), J.B(J.G(st, "forced"))) }, { "desc", txt }, { "from_version", f } }));
+            }
+            if (!autoAdd) return;
+            // languages the film already has: track 1 and the list
+            var t1 = audio1.ToJson() as Dict;
+            string lang1 = J.S(J.G(t1, "lang")); if (lang1 == "") lang1 = J.S(J.G(J.G(probe, "moflex"), "lang_main"));
+            var haveA = new HashSet<string>(lvAud.Items.Cast<ListViewItem>().Select(i => J.S(J.G(i.Tag, "label")).ToLowerInvariant()));
+            if (lang1 != "") haveA.Add(lang1.ToLowerInvariant().Substring(0, Math.Min(3, lang1.Length)));
+            var haveS = new HashSet<string>(lvSubs.Items.Cast<ListViewItem>().Select(i => J.S(J.G(i.Tag, "label")).ToLowerInvariant()));
+            int na = 0, ns = 0;
+            foreach (var a in J.A(J.G(pr, "audio")))
+            {
+                string l = J.S(J.G(a, "lang")).ToLowerInvariant(), t = J.S(J.G(a, "title")).ToLowerInvariant();
+                if (t.Contains("comment")) l = "com";
+                if (!Regex.IsMatch(l, "^[a-z][a-z0-9]{1,2}$") || l == "und" || haveA.Contains(l) || lvAud.Items.Count >= MaxExtraAudio) continue;
+                AddAudRow(new Dict { { "file", f }, { "stream", J.I(J.G(a, "index")) }, { "offset", 0.0 }, { "lang", l }, { "label", l }, { "from_version", f },
+                    { "desc", string.Format("{0}  #{1}  {2}  {3} {4}ch", what, J.I(J.G(a, "index")), J.S(J.G(a, "lang")).ToUpper(), J.S(J.G(a, "codec")), J.I(J.G(a, "channels"))) } });
+                haveA.Add(l); na++;
+            }
+            foreach (var st in J.A(J.G(pr, "subtitles")))
+            {
+                if (J.B(J.G(st, "image")) || lvSubs.Items.Count >= 16) continue;
+                string l = SubLabel(J.S(J.G(st, "lang")), J.S(J.G(st, "title")), J.B(J.G(st, "forced")));
+                if (haveS.Contains(l)) continue;
+                AddSubRow(new Dict { { "file", f }, { "stream", J.I(J.G(st, "index")) }, { "label", l }, { "offset", 0.0 }, { "from_version", f },
+                    { "desc", string.Format("{0} stream #{1} {2} {3}", what, J.I(J.G(st, "index")), J.S(J.G(st, "codec")), J.S(J.G(st, "title"))).Trim() } });
+                haveS.Add(l); ns++;
+            }
+            RenumberAud(); RenumberSubs();
+            int nAudio = J.A(J.G(pr, "audio")).Length, nSubs = J.A(J.G(pr, "subtitles")).Count(x => !J.B(J.G(x, "image")));
+            SetStatus(string.Format("{0}: {1} audio and {2} subtitle stream(s). Added {3} audio track(s) and {4} subtitle track(s) in new languages; the rest are in the Audio / Subtitles add boxes.",
+                Path.GetFileName(f), nAudio, nSubs, na, ns));
+        }
+
+        void ForgetVersionStreams(string f)
+        {
+            foreach (var lv in new[] { lvAud, lvSubs })
+                for (int i = lv.Items.Count - 1; i >= 0; i--)
+                    if (string.Equals(J.S(J.G(lv.Items[i].Tag, "from_version")), f, StringComparison.OrdinalIgnoreCase)) lv.Items.RemoveAt(i);
+            for (int i = cmbSubFrom.Items.Count - 1; i >= 0; i--)
+            {
+                var it = cmbSubFrom.Items[i] as Item;
+                if (it != null && string.Equals(J.S(J.G(it.Tag, "from_version")), f, StringComparison.OrdinalIgnoreCase)) cmbSubFrom.Items.RemoveAt(i);
+            }
+            if (cmbSubFrom.SelectedIndex < 0 && cmbSubFrom.Items.Count > 0) cmbSubFrom.SelectedIndex = 0;
+            audio2.RemoveFileStreams(f);
+            RenumberAud(); RenumberSubs();
         }
 
         void UpdateSelectedVersion()
