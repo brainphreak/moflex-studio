@@ -459,7 +459,7 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "1.4";
+        const string AppVersion = "1.5";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
@@ -485,7 +485,7 @@ namespace MoflexStudio
         ComboBox cmbLayout; RadioButton rad3D, rad2D; NumericUpDown numBitrate; Label lblVideoNote;
         AudioPicker audio1, audio2;           // audio2 = the editor for one extra track (2..8)
         ListView lvAud; Label lblAudCount;
-        ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout;
+        ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout, cmbVerAudio;
         ListView lvSubs; ComboBox cmbSubFrom; TextBox txtSubLabel; NumericUpDown numSubOffset; Label lblSubCount;
         ComboBox cmbKind, cmbResults, cmbCategory, cmbFormat; TextBox txtQuery, txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc;
         NumericUpDown numS, numE; PictureBox picArt; Label lblArt; Button btnArtKeep;
@@ -576,22 +576,24 @@ namespace MoflexStudio
             lblVideoNote = Note(tVideo, "", 10, 110, 576, 104);
             var grpVer = Add(tVideo, new GroupBox { Text = "Other versions of the film  (CLOWNSEC player: VIDEO > Version)", Left = 8, Top = 216, Width = 580, Height = 196 });
             lvVer = new ListView { Left = 8, Top = 20, Width = 460, Height = 100, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
-            lvVer.Columns.Add("#", 28); lvVer.Columns.Add("Name", 70); lvVer.Columns.Add("From", 340);
+            lvVer.Columns.Add("#", 44); lvVer.Columns.Add("Name", 62); lvVer.Columns.Add("From", 246); lvVer.Columns.Add("Audio", 104);
             var bVerAdd = new Button { Text = "Add file...", Left = 474, Top = 19, Width = 98 };
             var bVerRm = new Button { Text = "Remove", Left = 474, Top = 47, Width = 98 };
             var bVerUp = new Button { Text = "Up", Left = 474, Top = 75, Width = 47 };
             var bVerDn = new Button { Text = "Down", Left = 525, Top = 75, Width = 47 };
-            var lVn = new Label { Text = "Name", Left = 8, Top = 132, Width = 40 };
-            txtVerLabel = new TextBox { Left = 50, Top = 128, Width = 70, MaxLength = 7 };
-            var lVl = new Label { Text = "Layout", Left = 130, Top = 132, Width = 46 };
-            cmbVerLayout = new ComboBox { Left = 178, Top = 128, Width = 150, DropDownStyle = ComboBoxStyle.DropDownList };
+            var lVn = new Label { Text = "Name", Left = 8, Top = 132, Width = 38 };
+            txtVerLabel = new TextBox { Left = 46, Top = 128, Width = 62, MaxLength = 7 };
+            var lVl = new Label { Text = "Layout", Left = 114, Top = 132, Width = 44 };
+            cmbVerLayout = new ComboBox { Left = 158, Top = 128, Width = 84, DropDownStyle = ComboBoxStyle.DropDownList };
+            var lVa = new Label { Text = "Default audio", Left = 248, Top = 132, Width = 78 };
+            cmbVerAudio = new ComboBox { Left = 326, Top = 128, Width = 142, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbVerLayout.Items.AddRange(new object[] { new Item("Auto", "auto"), new Item("2D", "2d"), new Item("Half SBS", "hsbs"), new Item("Full SBS", "fsbs") });
             cmbVerLayout.SelectedIndex = 0;
-            var bVerUpd = new Button { Text = "Update selected", Left = 336, Top = 127, Width = 132 };
-            var nVer = new Label { Text = "Row 1 is the MAIN version: the file's normal video, what every player shows. The others are for the CLOWNSEC player (VIDEO > Version). " +
-                "Same film, same timeline. Video files are encoded like the main one; a moflex is used as it is.",
+            var bVerUpd = new Button { Text = "Update selected", Left = 474, Top = 127, Width = 98 };
+            var nVer = new Label { Text = "Row 1 is the MAIN version: the file's normal video, what every player shows. The others are for the CLOWNSEC player (VIDEO > Version), " +
+                "which switches to each one's default audio (the viewer can still change it). Same film, same timeline.",
                 Left = 8, Top = 156, Width = 564, Height = 34, ForeColor = SystemColors.GrayText };
-            grpVer.Controls.AddRange(new Control[] { lvVer, bVerAdd, bVerRm, bVerUp, bVerDn, lVn, txtVerLabel, lVl, cmbVerLayout, bVerUpd, nVer });
+            grpVer.Controls.AddRange(new Control[] { lvVer, bVerAdd, bVerRm, bVerUp, bVerDn, lVn, txtVerLabel, lVl, cmbVerLayout, lVa, cmbVerAudio, bVerUpd, nVer });
             bVerAdd.Click += delegate { AddVersionFromUi(); };
             bVerRm.Click += delegate
             {
@@ -610,6 +612,7 @@ namespace MoflexStudio
                 var d = (Dict)lvVer.SelectedItems[0].Tag;
                 txtVerLabel.Text = J.S(J.G(d, "label"));
                 SelectItem(cmbVerLayout, J.S(J.G(d, "source_type")) == "" ? "auto" : J.S(J.G(d, "source_type")));
+                SelectItem(cmbVerAudio, J.S(J.G(d, "audio_ref")) == "" ? "t1" : J.S(J.G(d, "audio_ref")));
             };
             rad3D.CheckedChanged += delegate { UpdateVideoNote(); UpdateAutoName(); };
             cmbLayout.SelectedIndexChanged += delegate { UpdateVideoNote(); };
@@ -1190,7 +1193,10 @@ namespace MoflexStudio
                 aud["main"] = new Dict { { "keep", true } };
                 aud["extra"] = J.A(J.G(mf, "audios")).Select(a => (object)new Dict { { "keep", J.I(J.G(a, "existing")) },
                     { "label", J.S(J.G(a, "lang")).ToLowerInvariant() }, { "desc", AudioPicker.KeepText(a) } }).ToArray();
+                var vaud = J.A(J.G(mf, "vaud")).Select(x => J.I(x)).ToArray();
+                job["main_default_audio"] = vaud.Length > 0 ? vaud[0] : 1;
                 job["versions"] = J.A(J.G(mf, "videos")).Select(v => (object)new Dict { { "existing", J.I(J.G(v, "existing")) },
+                    { "default_audio", J.I(J.G(v, "existing")) + 1 < vaud.Length ? vaud[J.I(J.G(v, "existing")) + 1] : 1 },
                     { "label", J.S(J.G(v, "label")) }, { "desc", "Current version " + (J.I(J.G(v, "existing")) + 2) } }).ToArray();
                 job["main_label"] = J.S(J.G(mf, "vid_main"));
                 var subs = new List<object>();
@@ -1321,7 +1327,7 @@ namespace MoflexStudio
             lvVer.Items.Clear();
             var vrows = J.A(J.G(job, "versions")).Select(vx => J.D(vx)).Where(vx => vx != null).Select(vx => J.Clone(vx)).ToList();
             if (!vrows.Any(vx => J.B(J.G(vx, "self"))))                    // this file's own video: row 1 unless moved
-                vrows.Insert(0, new Dict { { "self", true }, { "label", J.S(J.G(job, "main_label")) } });
+                vrows.Insert(0, new Dict { { "self", true }, { "label", J.S(J.G(job, "main_label")) }, { "default_audio", J.I(J.G(job, "main_default_audio")) } });
             foreach (var vd in vrows) AddVerRow(vd);
             RenumberVer();
             txtVerLabel.Text = ""; cmbVerLayout.SelectedIndex = 0;
@@ -1449,6 +1455,7 @@ namespace MoflexStudio
 
         void AddAudRow(Dict d)
         {
+            if (J.S(J.G(d, "_id")) == "") d["_id"] = Guid.NewGuid().ToString("N").Substring(0, 10);
             var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")).ToUpper(), AudDesc(d, probe),
                 J.F(J.G(d, "offset")) == 0 ? "" : J.F(J.G(d, "offset")).ToString("0.###", J.CI) });
             lvi.Tag = d; lvAud.Items.Add(lvi);
@@ -1459,6 +1466,7 @@ namespace MoflexStudio
             RenumberList(lvAud);
             lblAudCount.Text = "Tracks 2-8: " + lvAud.Items.Count + " / " + MaxExtraAudio;
             lblAudCount.ForeColor = lvAud.Items.Count > MaxExtraAudio ? Color.Firebrick : SystemColors.GrayText;
+            RefreshVerAudio();
         }
 
         void AddAudFromUi(bool update)
@@ -1473,7 +1481,9 @@ namespace MoflexStudio
             {
                 if (lvAud.SelectedItems.Count == 0) { SetStatus("Select a track in the list first."); return; }
                 var it = lvAud.SelectedItems[0];
+                d["_id"] = J.S(J.G(it.Tag, "_id"));          // versions point at this track: keep its identity
                 it.Tag = d; it.SubItems[1].Text = J.S(d["label"]).ToUpper(); it.SubItems[2].Text = J.S(d["desc"]);
+                RefreshVerAudio();
                 it.SubItems[3].Text = J.F(J.G(d, "offset")) == 0 ? "" : J.F(J.G(d, "offset")).ToString("0.###", J.CI);
                 return;
             }
@@ -1492,6 +1502,7 @@ namespace MoflexStudio
 
         void RenumberVer()
         {
+            RefreshVerAudio();
             for (int i = 0; i < lvVer.Items.Count; i++)
             {
                 lvVer.Items[i].Text = i == 0 ? "1 main" : (i + 1).ToString();
@@ -1501,10 +1512,15 @@ namespace MoflexStudio
 
         void AddVerRow(Dict d)
         {
+            if (J.S(J.G(d, "audio_ref")) == "")
+            {
+                int n = J.I(J.G(d, "default_audio"));
+                d["audio_ref"] = n >= 2 && n - 2 < lvAud.Items.Count ? J.S(J.G(lvAud.Items[n - 2].Tag, "_id")) : "t1";
+            }
             string desc = J.B(J.G(d, "self")) ? "This file's video" + (probe != null ? "  (" + Path.GetFileName(J.S(J.G(probe, "path"))) + ")" : "")
                 : J.Has(d, "desc") ? J.S(d["desc"]) : J.Has(d, "existing") && !J.Has(d, "source")
                 ? "Current version " + (J.I(d["existing"]) + 2) : Path.GetFileName(J.S(J.G(d, "source")));
-            var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")), desc }); lvi.Tag = d; lvVer.Items.Add(lvi);
+            var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")), desc, "" }); lvi.Tag = d; lvVer.Items.Add(lvi);
         }
 
         async void AddVersionFromUi()
@@ -1603,6 +1619,52 @@ namespace MoflexStudio
             d["label"] = l; it.SubItems[1].Text = l;
             var lit = cmbVerLayout.SelectedItem as Item;
             if (J.Has(d, "source")) d["source_type"] = lit == null ? "auto" : (string)lit.Tag;
+            var ait = cmbVerAudio.SelectedItem as Item;
+            if (ait != null) d["audio_ref"] = (string)ait.Tag;
+            RefreshVerAudio();
+        }
+
+        // ---- each version's default audio: "t1" = track 1, else the _id of a row in the audio list
+        string Track1Lang()
+        {
+            string l = J.S(J.G(audio1.ToJson(), "lang"));
+            if (l == "") l = J.S(J.G(J.G(probe, "moflex"), "lang_main"));
+            return l.ToUpper();
+        }
+
+        // the track number a reference points at now (1 = track 1), or 0 if that track is gone
+        int TrackNumber(string aref)
+        {
+            if (aref == "" || aref == "t1") return 1;
+            for (int i = 0; i < lvAud.Items.Count; i++) if (J.S(J.G(lvAud.Items[i].Tag, "_id")) == aref) return i + 2;
+            return 0;
+        }
+
+        void RefreshVerAudio()
+        {
+            if (cmbVerAudio == null) return;
+            var keep = cmbVerAudio.SelectedItem as Item;
+            cmbVerAudio.Items.Clear();
+            string l1 = Track1Lang();
+            cmbVerAudio.Items.Add(new Item("Track 1" + (l1 != "" ? "  " + l1 : ""), "t1"));
+            for (int i = 0; i < lvAud.Items.Count; i++)
+                cmbVerAudio.Items.Add(new Item("Track " + (i + 2) + "  " + J.S(J.G(lvAud.Items[i].Tag, "label")).ToUpper(), J.S(J.G(lvAud.Items[i].Tag, "_id"))));
+            if (keep == null || !SelectItemQuiet(cmbVerAudio, (string)keep.Tag)) cmbVerAudio.SelectedIndex = 0;
+            foreach (ListViewItem it in lvVer.Items)
+            {
+                var d = (Dict)it.Tag;
+                int n = TrackNumber(J.S(J.G(d, "audio_ref")));
+                if (n == 0) { d["audio_ref"] = "t1"; n = 1; }                    // its track was removed: back to track 1
+                string lab = n == 1 ? l1 : J.S(J.G(lvAud.Items[n - 2].Tag, "label")).ToUpper();
+                while (it.SubItems.Count < 4) it.SubItems.Add("");
+                it.SubItems[3].Text = "Track " + n + (lab != "" ? "  " + lab : "");
+            }
+        }
+
+        static bool SelectItemQuiet(ComboBox c, string tag)
+        {
+            for (int i = 0; i < c.Items.Count; i++) if ((string)((Item)c.Items[i]).Tag == tag) { c.SelectedIndex = i; return true; }
+            return false;
         }
 
         // ---- subtitles tab
@@ -1942,7 +2004,7 @@ namespace MoflexStudio
                 { "extra", lvAud.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray() } };
             if (lvVer.Items.Count > MaxVersions + 1) { error = "At most 4 video versions (the main one plus 3)."; tabs.SelectedIndex = 0; return null; }
             var vrowsOut = lvVer.Items.Cast<ListViewItem>().Select(i => J.Clone((Dict)i.Tag)).ToList();
-            foreach (var vd in vrowsOut) vd.Remove("desc");
+            foreach (var vd in vrowsOut) { vd.Remove("desc"); int tn = TrackNumber(J.S(J.G(vd, "audio_ref"))); vd["default_audio"] = tn < 1 ? 1 : tn; }
             job["main_label"] = vrowsOut.Count > 0 ? J.S(J.G(vrowsOut[0], "label")) : "";
             // just this file's video = no versions; otherwise the list in order, row 1 the main one
             job["versions"] = vrowsOut.Count <= 1 ? new object[0] : vrowsOut.Select(vd2 => (object)vd2).ToArray();

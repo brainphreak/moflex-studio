@@ -38,6 +38,9 @@ Job (every field optional except source):
                {"source": "bw.moflex", "label": "B&W"} ],      an existing moflex (same size + 3D mode)
              alternate VIDEO versions (CLOWNSEC player: VIDEO > Version); same timeline as the main.
  "main_label": "ORIG",                     the main version's name in that menu
+             Each version row may carry "default_audio": N (1 = track 1 .. 8), the track the player
+             switches to with that version (VAU0); "main_default_audio" does it for the main one
+             in jobs without a {"self": true} row. Default 1.
  "subtitles": [ {"existing": 0, "label": "eng"},              a track the SUPER MOFLEX already has
                 {"file": "x.eng.srt", "label": "eng", "offset": 0.0},
                 {"file": null|"movie.mkv", "stream": 3, "label": "dub"} ],
@@ -192,7 +195,7 @@ def read_trailer(path):
     """-> dict(base=len of the block region, sections=[(4cc, section bytes or Sec)], parsed views)"""
     size = os.path.getsize(path)
     t = {'base': size, 'sections': [], 'nfo': {}, 'lang_main': '', 'audio2': None, 'audios': [],
-         'videos': [], 'vid_main': '', 'subs': [], 'art': False}
+         'videos': [], 'vid_main': '', 'vaud': [], 'subs': [], 'art': False}
     with open(path, 'rb') as f:
         if size < 16:
             return t
@@ -242,6 +245,8 @@ def read_trailer(path):
                                 'bytes': len(sec) - 16})
         elif cc == b'VLB0':
             t['vid_main'] = body[:8].rstrip(b'\0').decode('utf-8', 'replace')
+        elif cc == b'VAU0':
+            t['vaud'] = list(body[:MAX_VERSIONS + 1])
         elif cc in (b'SUB0', b'SUB1'):
             if cc == b'SUB1':
                 lang, data = body[:4].rstrip(b'\0').decode('ascii', 'replace'), body[4:]
@@ -350,7 +355,7 @@ def probe(path):
             is3d = '1' if ('(3d)' in low or 'sbs' in low or 'lrf' in low or '_3d' in low) else '0'
         info['moflex'] = {'is3d': is3d == '1', 'nfo': nfo, 'lang_main': t['lang_main'],
                           'audio2': t['audio2'], 'audios': t['audios'], 'videos': t['videos'],
-                          'vid_main': t['vid_main'], 'subs': t['subs'], 'art': t['art']}
+                          'vid_main': t['vid_main'], 'vaud': t['vaud'], 'subs': t['subs'], 'art': t['art']}
         if nfo.get('title'):
             info['parsed']['title'] = nfo['title']
         if nfo.get('year', '').isdigit():
@@ -713,15 +718,20 @@ def reaudio(moflex, wav, work):
         raise RuntimeError('replacing the in-band audio failed: ' + (r.stdout + r.stderr)[-500:])
     os.replace(tmp, moflex)
 
-def version_order(job, old_vids):
+def version_order(job, old_vids, old_vaud=(), existing=None):
     """the job's versions in output order: [{'self': True}...] marks this file's own video. Jobs from
     before the main could move list only the alternates (the file's own video first, main_label)."""
     vs = job.get('versions')
-    if vs is None:                                       # not specified: keep what the file has
-        vs = [{'existing': i} for i in range(len(old_vids))]
+    old_vaud = list(old_vaud)
+    old_labels = [v['label'] for v in (existing or {}).get('videos', [])]
+    if vs is None:                                       # not specified: keep what the file has, names included
+        vs = [{'existing': i, 'label': old_labels[i] if i < len(old_labels) else '',
+               'default_audio': old_vaud[i + 1] if i + 1 < len(old_vaud) else 1} for i in range(len(old_vids))]
+        job.setdefault('main_default_audio', old_vaud[0] if old_vaud else 1)
+        job.setdefault('main_label', (existing or {}).get('vid_main') or '')
     vs = [dict(v, _n=n) for n, v in enumerate(vs)]       # _n: the key encode_versions used
     if not any(v.get('self') for v in vs):
-        vs = [{'self': True, 'label': job.get('main_label') or ''}] + vs
+        vs = [{'self': True, 'label': job.get('main_label') or '', 'default_audio': job.get('main_default_audio') or 1}] + vs
     return vs
 
 def blocks_only(src, dst):
@@ -875,7 +885,7 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
 
     # ---- video versions: the first is the main (the file's own blocks), the rest go in the trailer
     old_vids = [s for cc, s in existing['sections'] if cc == b'VID1']
-    order = version_order(job, old_vids)
+    order = version_order(job, old_vids, existing.get('vaud') or (), existing)
     n_alt = len(order) - 1
     if n_alt > MAX_VERSIONS:
         raise RuntimeError(f'{len(order)} video versions -- the player holds at most {MAX_VERSIONS + 1}')
@@ -929,6 +939,12 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
         for label, pth in built[1:]:
             secs.append(VidSec(pth, label) if isinstance(pth, str) else pth)
         secs.append(section(b'VLB0', built[0][0]))
+        # each version's default audio track (1..total), main first: the player switches to it with the version
+        n_tracks = 1 + len(extras)
+        vaud = bytes(max(1, min(n_tracks, int(v.get('default_audio') or 1))) for v in order)
+        secs.append(section(b'VAU0', vaud))
+        log('default audio per version: ' + ', '.join(f'{(lab.rstrip(bytes(1)).decode("utf-8", "replace") or "main")}=track {d}'
+                                                     for (lab, _), d in zip(built, vaud)), 'super')
         if main_blocks != base:
             log(f'main version: {built[0][0].rstrip(bytes(1)).decode("utf-8", "replace") or "(unnamed)"}', 'super')
 

@@ -97,6 +97,7 @@ The picture is always **letterboxed, never stretched**, so the aspect ratio is k
 - The list starts with **this file's video**. **Row 1 is the main version** (marked *main*): the file's normal video, what every player shows, including the official viewer. The other rows are for the CLOWNSEC player, which switches between them with **VIDEO > Version**.
 - **Add file...** a video file (it's encoded exactly like the main one: same 2D/3D output and bitrate) or a moflex (used as it is; it must be the same size and 2D/3D mode). **Layout** is that file's own picture layout, like *Source layout* above.
 - **Name** each one, this file's video too, in up to 7 characters (`B&W`, `COLOR`, `IMAX`): select a row, type it and click **Update selected**. That's what the player's Version row shows.
+- **Default audio:** each version has the audio track the player switches to with it (the **Audio** column; set it with **Default audio** and **Update selected**). Every version starts at Track 1, so with a single audio track nothing changes. The viewer can still pick any track after switching. It follows its track when you reorder the Audio list, and falls back to Track 1 if that track is removed.
 - **A version brings its own audio and subtitles.** When you add a video file, its audio and text subtitle streams appear in the Audio and Subtitles add boxes (labelled *Version N*), and the ones in a language the film doesn't have yet go straight into the lists. They're ordinary tracks that work with every version. Removing the version removes them again.
 - **Up / Down** reorder the list. Move a version to row 1 to make it the main one. On a SUPER MOFLEX that only swaps the videos around, without re-encoding. **Remove** drops a version (this file's own video can't be removed).
 - All versions must share one timeline: the player switches at the same moment. Each carries the same track 1 audio, so every audio track works with every version.
@@ -295,6 +296,7 @@ The job format is documented at the top of `app\moflex_studio.py`.
       - `AUD1` audio tracks 2 to 8, one section each, in order
       - `VID1` the other video versions, each a whole moflex with its name
       - `VLB0` the main version's name
+      - `VAU0` each version's default audio track
    4. Sections the file already had are copied byte for byte unless you changed them. Big ones (audio, video) are streamed, never loaded into memory.
    5. The result is checked before it's moved into place.
 
