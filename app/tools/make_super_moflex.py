@@ -22,11 +22,18 @@ Usage:
     --audio N        stream index for the IN-BAND track (the one the official player gets).
                      Without it the first eng-tagged track wins, which is wrong for a film
                      with no English dub but two English commentary tracks.
-    --audio2 N|none  stream index for the trailer (second) audio, or 'none' for no second track
-    --audio2-lang X  three-letter tag shown on the player's audio button for that track. Use it
+    --audio2 N|none  stream index for the trailer (second) audio, or 'none' for no second track.
+                     A comma list (--audio2 2,3,5) gives tracks 2, 3, 4... in that order (up to 7)
+    --audio2-lang X  three-letter tag shown on the player's audio button for that track (a comma
+                     list matches a comma list of --audio2). Use it
                      when the track is not what its language tag implies -- a COMMENTARY is
                      tagged eng, and labelling it ENG invites someone to press it expecting a
                      dub. COM says what it is.
+    --version F      an alternate VIDEO version, already a moflex (same size, 2D/3D mode and
+                     timeline -- e.g. a B&W master). Repeatable, up to 3. Its in-band audio is
+                     replaced with this build's track 1, so every audio track works with it.
+    --version-label X  its name in the player's VIDEO > Version row (up to 7 chars: B&W)
+    --main-label X   the main version's name in that row
     --art FILE       use this poster instead of the one TMDB would fetch
     --add-genres G   comma-separated genres to ADD to what TMDB reports (batch-safe;
                      duplicates are ignored), e.g. 'Studio Ghibli, Anime'
@@ -326,6 +333,7 @@ def main():
     offset = 0.0; sub_offset = 0.0
     o_format = None; o_3d = None
     a_main = a_second = None; o_art = None; a2_lang = None; tmdb_se = None; o_genres = ''
+    versions = []; main_label = None     # --version FILE [--version-label X], --main-label
     o_lang = None
     o_info = None
     only_subs = None
@@ -349,7 +357,13 @@ def main():
         elif args[i] == '--3d': o_3d = 1; i += 1
         elif args[i] == '--2d': o_3d = 0; i += 1
         elif args[i] == '--audio': a_main = int(args[i + 1]); i += 2
-        elif args[i] == '--audio2': a_second = int(args[i + 1]) if args[i+1] != 'none' else -1; i += 2
+        elif args[i] == '--audio2':
+            a_second = [int(x) for x in args[i + 1].split(',') if x.strip()] if args[i + 1] != 'none' else -1; i += 2
+        elif args[i] == '--version': versions.append([args[i + 1], None]); i += 2
+        elif args[i] == '--version-label':
+            if not versions: print('  --version-label goes after its --version'); sys.exit(1)
+            versions[-1][1] = args[i + 1]; i += 2
+        elif args[i] == '--main-label': main_label = args[i + 1]; i += 2
         elif args[i] == '--art': o_art = args[i + 1]; i += 2
         elif args[i] == '--add-genres': o_genres = args[i + 1]; i += 2
         elif args[i] == '--subs':
@@ -365,7 +379,7 @@ def main():
                     print(f'  --sub-label wants STREAM=CODE with a 2-3 character code starting with a letter, got {pair!r}'); sys.exit(1)
                 sub_labels[int(n)] = code
             i += 2
-        elif args[i] == '--audio2-lang': a2_lang = args[i + 1][:3].upper(); i += 2
+        elif args[i] == '--audio2-lang': a2_lang = [x.strip()[:3].upper() for x in args[i + 1].split(',')]; i += 2
         elif args[i] == '--lang': o_lang = args[i + 1][:3].lower(); i += 2
         elif args[i] == '--tmdb-se':
             _s, _e = args[i + 1].split(':'); tmdb_se = (int(_s), int(_e)); i += 2
@@ -393,22 +407,29 @@ def main():
         a_eng = by_index.get(a_main)
         if a_eng is None:
             print(f'  --audio {a_main} is not an audio stream in this file'); sys.exit(1)
-        if a_second == -1:   a_orig = None
+        if a_second == -1:   a_origs = []
         elif a_second is not None:
-            a_orig = by_index.get(a_second)
-            if a_orig is None:
-                print(f'  --audio2 {a_second} is not an audio stream'); sys.exit(1)
-        else: a_orig = next((s for s in audio if s is not a_eng), None)
+            a_origs = []
+            for n in a_second:
+                if by_index.get(n) is None:
+                    print(f'  --audio2 {n} is not an audio stream'); sys.exit(1)
+                a_origs.append(by_index[n])
+        else: a_origs = [s for s in audio if s is not a_eng][:1]
     else:
         a_eng = next((s for s in audio if s.get('tags', {}).get('language') == 'eng'), None)
-        a_orig = next((s for s in audio if s is not a_eng), None)
+        a_origs = [s for s in audio if s is not a_eng][:1]
     if not a_eng:
-        a_eng, a_orig = (audio[0], None) if audio else (None, None)
+        a_eng, a_origs = (audio[0], []) if audio else (None, [])
         print('  NOTE: no eng-tagged audio; using the first track in-band, no second track')
     if not a_eng:
         print('  ERROR: source has no audio'); sys.exit(1)
-    orig_lang = (a_orig.get('tags', {}).get('language', 'und')[:3].upper() if a_orig else None)
-    if a2_lang: orig_lang = a2_lang   # what it IS, not what it is tagged
+    if len(a_origs) > 7:
+        print(f'  ERROR: {len(a_origs)} extra audio tracks -- the player holds 7 besides track 1'); sys.exit(1)
+    if len(versions) > 3:
+        print(f'  ERROR: {len(versions)} video versions -- the player holds 3 besides the main one'); sys.exit(1)
+    orig_langs = [a.get('tags', {}).get('language', 'und')[:3].upper() for a in a_origs]
+    for k, lab in enumerate(a2_lang or []):   # what it IS, not what it is tagged
+        if k < len(orig_langs) and lab: orig_langs[k] = lab
 
     # ---- extract audio ----
     # --offset slides everything taken from the source onto the encode's timeline, for the case
@@ -430,8 +451,8 @@ def main():
         main_lang = 'eng'
         print("  NOTE: source tags its audio 'und'; tagging the in-band track ENG")
     eng_wav = wav(a_eng, main_lang)
-    orig_wav = wav(a_orig, orig_lang.lower()) if a_orig else None
-    print(f'  audio: eng ok' + (f', {orig_lang} ok' if orig_wav else ''))
+    orig_wavs = [(wav(a, f'{lab.lower()}.t{k + 2}'), lab) for k, (a, lab) in enumerate(zip(a_origs, orig_langs))]
+    print(f'  audio: eng ok' + ''.join(f', {lab} ok' for _, lab in orig_wavs))
 
     for n in sorted(sub_labels):
         st = next((x for x in subs if x['index'] == n), None)
@@ -717,8 +738,30 @@ def main():
     cmd = [sys.executable, ADDSTREAMS, enc, out,
            '--strip-audio', '--audio', eng_wav,
            '--lang', main_lang.upper(), '--nfo', nfo]
-    if orig_wav:
-        cmd += ['--trailer-audio', orig_wav, '--trailer-lang', orig_lang]
+    for w, lab in orig_wavs:
+        cmd += ['--trailer-audio', w, '--trailer-lang', lab]
+    for k, (vp, vl) in enumerate(versions):
+        # the alternate carries THIS build's track 1, so switching versions keeps the sound in step;
+        # its own trailer (if any) is dropped first -- addstreams only parses the block region
+        import struct as _st
+        vb = os.path.join(work, f'version{k + 2}.blocks.moflex')
+        with open(vp, 'rb') as vf:
+            vf.seek(0, 2); vsz = vf.tell(); vlen = vsz
+            if vsz >= 16:
+                vf.seek(vsz - 16); ft = vf.read(16)
+                if ft[8:] == b'CSXTRA01': vlen = _st.unpack('<Q', ft[:8])[0]
+            vf.seek(0)
+            with open(vb, 'wb') as fo:
+                left = vlen
+                while left > 0:
+                    b = vf.read(min(left, 8 << 20)); fo.write(b); left -= len(b)
+        va = os.path.join(work, f'version{k + 2}.moflex')
+        print(f'  version {k + 2}: {os.path.basename(vp)} -- giving it track 1')
+        subprocess.run([sys.executable, ADDSTREAMS, vb, va, '--strip-audio', '--audio', eng_wav], check=True)
+        os.remove(vb)
+        cmd += ['--trailer-video', va] + (['--trailer-video-label', vl] if vl else [])
+    if versions and main_label:
+        cmd += ['--main-label', main_label]
     for c, p in srt_files:
         # the player skips a SUB section over 1 MiB without a word: the track just never shows
         # in its menu (a raw karaoke ASS hit this at 1.4 MB; cleaned it is ~40 KB)
@@ -732,15 +775,19 @@ def main():
     subprocess.run(cmd, check=True)
     # ---- post-write verification: a NAS/SMB flake once zeroed part of a trailer ----
     import struct as _st
-    data = open(out, 'rb').read()
-    assert data[-8:] == b'CSXTRA01', 'footer missing after write'
-    poff = _st.unpack('<Q', data[-16:-8])[0]
-    p2 = poff; known = {b'NFO0', b'ART5', b'LNG0', b'SUB0', b'SUB1', b'AUD0', b'AUD1'}
-    while p2 + 8 <= len(data) - 16:
-        cc = bytes(data[p2:p2 + 4]); ln = _st.unpack('<I', data[p2 + 4:p2 + 8])[0]
-        assert cc in known, f'corrupt trailer section at {p2}'
-        p2 += 8 + ln
-    assert p2 == len(data) - 16, 'trailer walk did not land on the footer'
+    # (walked header by header: with video versions the file can be gigabytes)
+    with open(out, 'rb') as vf:
+        vf.seek(0, 2); dlen = vf.tell()
+        vf.seek(dlen - 16); ft = vf.read(16)
+        assert ft[8:] == b'CSXTRA01', 'footer missing after write'
+        poff = _st.unpack('<Q', ft[:8])[0]
+        p2 = poff; known = {b'NFO0', b'ART5', b'LNG0', b'SUB0', b'SUB1', b'AUD0', b'AUD1', b'VID1', b'VLB0'}
+        while p2 + 8 <= dlen - 16:
+            vf.seek(p2); h = vf.read(8)
+            cc = h[:4]; ln = _st.unpack('<I', h[4:8])[0]
+            assert cc in known, f'corrupt trailer section at {p2}'
+            p2 += 8 + ln
+    assert p2 == dlen - 16, 'trailer walk did not land on the footer'
     print('  verified: trailer sections intact')
     # the full-size poster travels NEXT TO the movie, same name, .jpg extension
     if info['poster'] and os.path.exists(info['poster']):

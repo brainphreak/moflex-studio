@@ -28,9 +28,16 @@ Job (every field optional except source):
  "audio": {
    "main":   {"keep": true} | {"normalize": true}
            | {"file": null|"path", "stream": N, "offset": 0.0, "lang": "eng"},
-   "second": {"keep": true, "label": "JPN"} | null
-           | {"file": null|"path", "stream": N, "offset": 0.0, "lang": "jpn", "label": "COM"}
+   "extra":  [ {"keep": 0, "label": "JPN"},                 trailer track 0 the file already has
+               {"file": null|"path", "stream": N, "offset": 0.0, "lang": "jpn", "label": "COM"} ]
+             audio tracks 2..8 (CLOWNSEC player only; the official player plays track 1).
+             Older jobs may give "second": {...} | null instead -- read as a one-item "extra".
  },
+ "versions": [ {"existing": 0, "label": "B&W"},                an alternate the SUPER MOFLEX already has
+               {"source": "colour.mkv", "source_type": "auto", "label": "COLOR"},   encoded like the main
+               {"source": "bw.moflex", "label": "B&W"} ],      an existing moflex (same size + 3D mode)
+             alternate VIDEO versions (CLOWNSEC player: VIDEO > Version); same timeline as the main.
+ "main_label": "ORIG",                     the main version's name in that menu
  "subtitles": [ {"existing": 0, "label": "eng"},              a track the SUPER MOFLEX already has
                 {"file": "x.eng.srt", "label": "eng", "offset": 0.0},
                 {"file": null|"movie.mkv", "stream": 3, "label": "dub"} ],
@@ -58,6 +65,8 @@ NO_WINDOW = 0x08000000 if IS_WIN else 0
 IMAGE_SUBS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvdsub', 'dvb_subtitle', 'xsub', 'pgssub'}
 MAX_SUBS = 16
 MAX_SUB_BYTES = 1024 * 1024 - 4
+MAX_EXTRA_AUDIO = 7                     # + the in-band track = the 8 the player's audio menu holds
+MAX_VERSIONS = 3                        # alternate video versions besides the main one
 
 # ------------------------------------------------------------------ settings
 def load_settings():
@@ -127,10 +136,63 @@ def run_quiet(cmd, **kw):
                           creationflags=NO_WINDOW, **kw)
 
 # ------------------------------------------------------------------ CSXTRA trailer
+class Sec:
+    """a big trailer section (audio, video) left in its file: copied across in chunks, never loaded.
+    `patch` = (offset in the section, bytes) applied on the way out (a relabel)."""
+    def __init__(self, path, off, size, head, patch=None):
+        self.path, self.off, self.size, self.head, self.patch = path, off, size, head, patch
+    def __len__(self):
+        return self.size
+    def __getitem__(self, k):            # only ever the header bytes (4cc, length, label)
+        return self.head[k]
+    def relabel(self, at, data):
+        return Sec(self.path, self.off, self.size, self.head[:at] + data + self.head[at + len(data):], (at, data))
+    def write_to(self, fo):
+        with open(self.path, 'rb') as fi:
+            fi.seek(self.off)
+            left, first = self.size, True
+            while left > 0:
+                b = fi.read(min(left, 8 << 20))
+                if not b:
+                    raise RuntimeError('source file shrank while copying a trailer section')
+                if first and self.patch:
+                    at, data = self.patch
+                    b = b[:at] + data + b[at + len(data):]
+                first = False
+                fo.write(b); left -= len(b)
+
+class VidSec:
+    """'VID1' + label + a whole block-only moflex file, streamed"""
+    def __init__(self, path, label):
+        self.path, self.label = path, label
+        self.size = 16 + os.path.getsize(path)
+    def __len__(self):
+        return self.size
+    def write_to(self, fo):
+        fo.write(struct.pack('<4sI', b'VID1', self.size - 8) + self.label)
+        with open(self.path, 'rb') as fi:
+            shutil.copyfileobj(fi, fo, 8 << 20)
+
+def load_sec(s):
+    if not isinstance(s, Sec):
+        return s
+    with open(s.path, 'rb') as fi:
+        fi.seek(s.off)
+        return fi.read(s.size)
+
+def write_sec(fo, s):
+    if isinstance(s, (Sec, VidSec)):
+        s.write_to(fo)
+    else:
+        fo.write(s)
+
+LAZY = (b'AUD0', b'AUD1', b'VID1')
+
 def read_trailer(path):
-    """-> dict(base=len of the block region, sections=[(4cc, full section bytes)], parsed views)"""
+    """-> dict(base=len of the block region, sections=[(4cc, section bytes or Sec)], parsed views)"""
     size = os.path.getsize(path)
-    t = {'base': size, 'sections': [], 'nfo': {}, 'lang_main': '', 'audio2': None, 'subs': [], 'art': False}
+    t = {'base': size, 'sections': [], 'nfo': {}, 'lang_main': '', 'audio2': None, 'audios': [],
+         'videos': [], 'vid_main': '', 'subs': [], 'art': False}
     with open(path, 'rb') as f:
         if size < 16:
             return t
@@ -139,16 +201,21 @@ def read_trailer(path):
         if ft[8:] != b'CSXTRA01':
             return t
         off = struct.unpack('<Q', ft[:8])[0]
-        f.seek(off)
-        blob = f.read(size - 16 - off)
-    t['base'] = off
-    q = 0
-    while q + 8 <= len(blob):
-        cc, ln = struct.unpack_from('<4sI', blob, q)
-        if q + 8 + ln > len(blob):
-            raise RuntimeError(f'corrupt trailer section at {q}')
-        t['sections'].append((cc, blob[q:q + 8 + ln]))
-        q += 8 + ln
+        end = size - 16
+        t['base'] = off
+        q = off
+        while q + 8 <= end:
+            f.seek(q)
+            hd = f.read(32)
+            cc, ln = struct.unpack_from('<4sI', hd, 0)
+            if q + 8 + ln > end:
+                raise RuntimeError(f'corrupt trailer section at {q - off}')
+            if cc in LAZY:
+                t['sections'].append((cc, Sec(path, q, 8 + ln, hd[:min(len(hd), 8 + ln)])))
+            else:
+                f.seek(q)
+                t['sections'].append((cc, f.read(8 + ln)))
+            q += 8 + ln
     for cc, sec in t['sections']:
         body = sec[8:]
         if cc == b'NFO0':
@@ -162,11 +229,19 @@ def read_trailer(path):
             if cc == b'AUD1':
                 rate, ch, spp = struct.unpack_from('<IHH', body, 0)
                 lang = body[8:12].rstrip(b'\0').decode('ascii', 'replace')
-                data_len = len(body) - 12
+                data_len = len(sec) - 8 - 12
             else:
-                rate, ch = struct.unpack_from('<IH', body, 0); spp = 1024; lang = ''; data_len = len(body) - 8
+                rate, ch = struct.unpack_from('<IH', body, 0); spp = 1024; lang = ''; data_len = len(sec) - 8 - 8
             secs = data_len * 2 / max(1, ch) / max(1, rate)          # 4-bit IMA: ~2 samples per byte
-            t['audio2'] = {'lang': lang, 'rate': rate, 'channels': ch, 'seconds': round(secs, 1), 'bytes': len(body)}
+            a = {'existing': len(t['audios']), 'lang': lang, 'rate': rate, 'channels': ch,
+                 'seconds': round(secs, 1), 'bytes': len(sec) - 8}
+            t['audios'].append(a)
+            t['audio2'] = t['audio2'] or a
+        elif cc == b'VID1':
+            t['videos'].append({'existing': len(t['videos']), 'label': body[:8].rstrip(b'\0').decode('utf-8', 'replace'),
+                                'bytes': len(sec) - 16})
+        elif cc == b'VLB0':
+            t['vid_main'] = body[:8].rstrip(b'\0').decode('utf-8', 'replace')
         elif cc in (b'SUB0', b'SUB1'):
             if cc == b'SUB1':
                 lang, data = body[:4].rstrip(b'\0').decode('ascii', 'replace'), body[4:]
@@ -182,6 +257,16 @@ def read_trailer(path):
 
 def section(cc, body):
     return struct.pack('<4sI', cc, len(body)) + body
+
+def label8(text):
+    """a video version's name: up to 7 bytes of UTF-8, NUL-padded to 8"""
+    b = (text or '').strip().encode('utf-8')[:7]
+    while b:
+        try:
+            b.decode('utf-8'); break
+        except UnicodeDecodeError:
+            b = b[:-1]
+    return b.ljust(8, b'\0')
 
 def lang4(code):
     return (code or 'und').upper().encode('ascii', 'replace')[:3].ljust(4, b'\0')
@@ -264,7 +349,8 @@ def probe(path):
             low = os.path.basename(path).lower()
             is3d = '1' if ('(3d)' in low or 'sbs' in low or 'lrf' in low or '_3d' in low) else '0'
         info['moflex'] = {'is3d': is3d == '1', 'nfo': nfo, 'lang_main': t['lang_main'],
-                          'audio2': t['audio2'], 'subs': t['subs'], 'art': t['art']}
+                          'audio2': t['audio2'], 'audios': t['audios'], 'videos': t['videos'],
+                          'vid_main': t['vid_main'], 'subs': t['subs'], 'art': t['art']}
         if nfo.get('title'):
             info['parsed']['title'] = nfo['title']
         if nfo.get('year', '').isdigit():
@@ -322,7 +408,7 @@ def tmdb_details(kind, tid, se=None):
             if e.get('runtime'):
                 info['runtime'] = e['runtime']
             if e.get('name'):
-                info['desc'] = f'S{se[0]}.E{se[1]} “{e["name"]}” - {e.get("overview", "")}'
+                info['desc'] = f'S{int(se[0]):02d}e{int(se[1]):02d} “{e["name"]}” - {e.get("overview", "")}'
         return info
     d = tmdb(f'movie/{tid}')
     return {'title': d['title'], 'year': int((d.get('release_date') or '0')[:4] or 0),
@@ -555,6 +641,47 @@ def nfo_section(md, is3d):
         lines.append(f"showdesc={f(str(md['showdesc']))}")
     return section(b'NFO0', ('\n'.join(lines) + '\n').encode('utf-8'))
 
+FAT32_MAX = 4 * 1024 ** 3 - 1          # the 3DS SD card is FAT32: no file can reach 4 GiB
+ADPCM_BPS = 44100 / 1024 * (8 + 1024)   # bytes/s of one 44.1 kHz stereo IMA-ADPCM track (4-byte state per channel + 1024 samples)
+
+def estimate_size(job, info):
+    """rough output size in bytes, BEFORE any work: video at its bitrate (+3% container), each audio track as ADPCM"""
+    dur = info.get('duration') or 0
+    aud = job.get('audio') or {}
+    if info['kind'] == 'video':
+        size = (job.get('bitrate') or 1400) * 1000 / 8 * dur * 1.03 + ADPCM_BPS * dur   # track 1 (even silent is ADPCM)
+    else:
+        size = os.path.getsize(info['path'])            # blocks + any trailer it has now (upper bound)
+    for it in extra_audio(job, None):
+        if it and 'keep' not in it:
+            size += ADPCM_BPS * dur
+    for v in job.get('versions') or []:
+        if v.get('source'):
+            if is_moflex(v['source']):
+                size += os.path.getsize(v['source'])
+            else:
+                size += (job.get('bitrate') or 1400) * 1000 / 8 * dur * 1.03 + ADPCM_BPS * dur
+    return int(size)
+
+def extra_audio(job, existing):
+    """the job's trailer audio list (new "extra", or the older single "second"); None = keep what the file has"""
+    aud = job.get('audio') or {}
+    if 'extra' in aud:
+        return [x for x in (aud['extra'] or []) if x]
+    if 'second' in aud:
+        sec = aud['second']
+        if not sec:
+            return []
+        return [dict(sec, keep=0) if sec.get('keep') is True else sec]
+    if existing is None:
+        return []
+    return [{'keep': i} for i in range(len(existing['audios']))]
+
+def check_fat32(size, what):
+    if size > FAT32_MAX:
+        raise RuntimeError(f'{what} is {size / 1024 ** 3:.2f} GB -- over the 4 GB a 3DS (FAT32) SD card can hold. '
+                           'Lower the bitrate on the Video tab, or drop track 2.')
+
 def fat_clean(name):
     for bad, rep in (('/', ' - '), (':', ' -'), ('*', ''), ('?', ''), ('"', "'"), ('<', ''), ('>', ''), ('|', ''), ('\\', ' ')):
         name = name.replace(bad, rep)
@@ -574,6 +701,42 @@ def library_name(md, is3d):
     else:
         base = f"{md['title']} ({md.get('year') or 0}){tag3d} (S)"
     return fat_clean(base) + '.moflex'
+
+def reaudio(moflex, wav, work):
+    """replace a block-only moflex's in-band audio with `wav` (in place)"""
+    tmp = os.path.join(work, 'reaudio.moflex')
+    r = run_quiet([sys.executable, '-u', os.path.join(S['tools_dir'], 'moflex_addstreams.py'),
+                   moflex, tmp, '--strip-audio', '--audio', wav])
+    for line in r.stdout.splitlines():
+        log(line, 'super')
+    if r.returncode != 0 or not os.path.exists(tmp):
+        raise RuntimeError('replacing the in-band audio failed: ' + (r.stdout + r.stderr)[-500:])
+    os.replace(tmp, moflex)
+
+def blocks_only(src, dst):
+    """copy a moflex's block region (no CSXTRA trailer) -> dst"""
+    t = read_trailer(src)
+    with open(src, 'rb') as fi, open(dst, 'wb') as fo:
+        left = t['base']
+        while left > 0:
+            b = fi.read(min(left, 8 << 20)); fo.write(b); left -= len(b)
+    return dst
+
+def track1_wav(base, work):
+    """the main version's in-band audio as 16-bit WAV (decoded, not re-normalised): what an
+    alternate version carries in-band, so switching versions keeps the same track 1"""
+    p = os.path.join(work, 'audio.track1.wav')
+    if not os.path.exists(p):
+        r = run_quiet([FFMPEG, '-y', '-v', 'error', '-i', base, '-map', '0:a:0', '-ar', '44100', '-ac', '2',
+                       '-c:a', 'pcm_s16le', p])
+        if r.returncode != 0:
+            raise RuntimeError('could not read the main version\'s audio for the alternate versions: ' + r.stderr.strip()[:300])
+    return p
+
+def video_shape(path):
+    pr = probe(path)
+    v = pr['video'] or {}
+    return v.get('width'), v.get('height'), pr['duration']
 
 def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
     """moflex_in: a plain moflex or SUPER MOFLEX. existing: read_trailer(moflex_in). Returns out path in work."""
@@ -610,14 +773,7 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
         if r.returncode != 0:
             raise RuntimeError('could not make the silent audio track: ' + r.stderr.strip()[:300])
     if wav:
-        base2 = os.path.join(work, 'base2.moflex')
-        r = run_quiet([sys.executable, '-u', os.path.join(S['tools_dir'], 'moflex_addstreams.py'),
-                       base, base2, '--strip-audio', '--audio', wav])
-        for line in r.stdout.splitlines():
-            log(line, 'super')
-        if r.returncode != 0 or not os.path.exists(base2):
-            raise RuntimeError('replacing the in-band audio failed: ' + (r.stdout + r.stderr)[-500:])
-        os.replace(base2, base)
+        reaudio(base, wav, work)
     if not want_super:
         return base, None
 
@@ -684,18 +840,69 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
             label = m.group(1) if m else None
         secs.append(section(b'SUB1', lang4(check_label(label or 'eng')) + data))
 
-    # ---- second audio (trailer)
-    second = aud.get('second', {'keep': True} if (b'AUD1' in old or b'AUD0' in old) else None)
-    if second and second.get('keep'):
-        s = old.get(b'AUD1') or old.get(b'AUD0')
-        if s:
-            if second.get('label') and s[:4] == b'AUD1':
-                s = s[:16] + lang4(check_label(second['label'])) + s[20:]
+    # ---- audio tracks 2..8 (trailer)
+    old_auds = [s for cc, s in existing['sections'] if cc in (b'AUD0', b'AUD1')]
+    extras = extra_audio(job, existing)
+    if len(extras) > MAX_EXTRA_AUDIO:
+        raise RuntimeError(f'{len(extras) + 1} audio tracks -- the player holds at most {MAX_EXTRA_AUDIO + 1}')
+    for n, it in enumerate(extras):
+        if 'keep' in it:
+            k = int(it['keep'])
+            if k >= len(old_auds):
+                raise RuntimeError(f'the file has no audio track {k + 2} to keep')
+            s = old_auds[k]
+            if it.get('label') and s[:4] == b'AUD1':
+                s = s.relabel(16, lang4(check_label(it['label'])))
+            elif s[:4] == b'AUD0':                      # oldest form has no label: read it whole once
+                s = section(b'AUD1', s[8:16] + lang4(check_label(it.get('label') or 'alt')) + load_sec(s)[16:])
             secs.append(s)
-    elif second and 'stream' in second:
-        emit('progress', stage='super', pct=82, note='preparing audio track 2')
-        w2 = audio_wav(second, default_audio_file, work, 'second')
-        secs.append(adpcm_section(w2, second.get('label') or second.get('lang') or 'alt'))
+        else:
+            emit('progress', stage='super', pct=82, note=f'preparing audio track {n + 2}')
+            w2 = audio_wav(it, default_audio_file, work, f'extra{n}')
+            secs.append(adpcm_section(w2, it.get('label') or it.get('lang') or 'alt'))
+            os.remove(w2)                               # an hour of PCM is ~600 MB: one at a time
+
+    # ---- alternate video versions (trailer): each a block-only moflex with the same track 1
+    old_vids = [s for cc, s in existing['sections'] if cc == b'VID1']
+    versions = job.get('versions')
+    if versions is None:
+        versions = [{'existing': i} for i in range(len(old_vids))]
+    if len(versions) > MAX_VERSIONS:
+        raise RuntimeError(f'{len(versions) + 1} video versions -- the player holds at most {MAX_VERSIONS + 1}')
+    if versions:
+        mw, mh, mdur = video_shape(base)
+        t1 = None
+        for n, v in enumerate(versions):
+            emit('progress', stage='super', pct=88 + 10 * n // len(versions), note=f'video version {n + 2}')
+            label = label8(v.get('label') or f'V{n + 2}')
+            if 'existing' in v and not v.get('source'):
+                k = int(v['existing'])
+                if k >= len(old_vids):
+                    raise RuntimeError(f'the file has no video version {k + 2} to keep')
+                if not wav:                              # track 1 unchanged: copy it as it is
+                    secs.append(old_vids[k].relabel(8, label))
+                    continue
+                alt = os.path.join(work, f'alt{n}.moflex')
+                with open(alt, 'wb') as fo:              # track 1 changed: the alternate gets it too
+                    s = old_vids[k]
+                    with open(s.path, 'rb') as fi:
+                        fi.seek(s.off + 16); left = s.size - 16
+                        while left > 0:
+                            b = fi.read(min(left, 8 << 20)); fo.write(b); left -= len(b)
+            else:
+                alt = (job.get('_alt_moflex') or {}).get(str(n)) or v['source']
+                alt = blocks_only(alt, os.path.join(work, f'alt{n}.moflex'))
+            aw, ah, adur = video_shape(alt)
+            if (aw, ah) != (mw, mh):
+                raise RuntimeError(f'video version {n + 2} is {aw}x{ah} but the main one is {mw}x{mh}: '
+                                   'both must be encoded the same way (same 2D/3D output)')
+            if mdur and adur and abs(mdur - adur) > 2:
+                log(f'warning: video version {n + 2} runs {adur:.1f} s, the main one {mdur:.1f} s -- '
+                    'the player switches at the same time, so they should share one timeline', 'super')
+            t1 = t1 or wav or track1_wav(base, work)
+            reaudio(alt, t1, work)
+            secs.append(VidSec(alt, label))
+        secs.append(section(b'VLB0', label8(job.get('main_label') or '')))
 
     # ---- write: blocks + sections + footer
     out = os.path.join(work, 'out.moflex')
@@ -703,7 +910,7 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
         shutil.copyfileobj(fi, fo, 8 << 20)
         boff = fo.tell()
         for s in secs:
-            fo.write(s)
+            write_sec(fo, s)
         fo.write(struct.pack('<Q8s', boff, b'CSXTRA01'))
     t = verify_trailer(out)
     kinds = {}
@@ -714,6 +921,34 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
     return out, poster_full
 
 # ------------------------------------------------------------------ job
+def versions_to_encode(job):
+    return [(n, v) for n, v in enumerate(job.get('versions') or []) if v.get('source') and not is_moflex(v['source'])]
+
+def encode_versions(job, work, is3d, first_stage, total):
+    """alternate versions given as video files: encoded exactly like the main one (same output, bitrate)"""
+    out, i = {}, first_stage
+    for n, v in versions_to_encode(job):
+        vinfo = probe(v['source'])
+        if not vinfo['video']:
+            raise RuntimeError(f'video version {n + 2}: no video stream in {os.path.basename(v["source"])}')
+        layout = (v.get('source_type') or 'auto').lower()
+        if layout == 'auto':
+            layout = vinfo['video']['detected']
+        if is3d and layout == '2d':
+            raise RuntimeError(f'video version {n + 2} is 2D but the output is 3D (set its layout to HSBS or FSBS)')
+        vj = dict(job, source=v['source'], output='3d' if is3d else '2d')
+        wd = os.path.join(work, f'version{n}'); os.makedirs(wd, exist_ok=True)
+        emit('stage', stage='avi', index=i, total=total, text=f'Version {n + 2}: converting to lossless AVI')
+        avi = os.path.join(wd, 'moflex_job.avi')
+        make_avi(vj, vinfo, layout, avi)
+        emit('stage', stage='moflex', index=i + 1, total=total,
+             text=f"Version {n + 2}: encoding {vj['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
+        out[str(n)] = make_moflex(vj, avi, wd)
+        os.remove(avi)
+        i += 2
+    job['_alt_moflex'] = out
+    return i
+
 def run_job(jobfile):
     with open(jobfile, encoding='utf-8') as f:
         job = json.load(f)
@@ -741,31 +976,37 @@ def run_job(jobfile):
             aud = job.setdefault('audio', {})
             if 'main' not in aud and info['audio']:
                 aud['main'] = {'stream': info['audio'][0]['index'], 'lang': (info['audio'][0]['lang'] or 'eng')[:3]}
-            stages = ['avi', 'moflex', 'super']
+            check_fat32(estimate_size(job, info), 'The output would be about')
+            n_alt = len(versions_to_encode(job))
+            total = 3 + 2 * n_alt
+            stages = ['avi', 'moflex'] + ['avi', 'moflex'] * n_alt + ['super']
             emit('start', source=src, kind=kind, work=work, layout=layout, output=job['output'], stages=stages,
                  duration=info['duration'])
-            emit('stage', stage='avi', index=1, total=3, text='Converting to lossless AVI')
+            emit('stage', stage='avi', index=1, total=total, text='Converting to lossless AVI')
             avi = os.path.join(work, 'moflex_job.avi')
             make_avi(job, info, layout, avi)
-            emit('stage', stage='moflex', index=2, total=3,
+            emit('stage', stage='moflex', index=2, total=total,
                  text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
             enc = make_moflex(job, avi, work)
             job['_video_only'] = True                        # the encoder got no audio; assemble adds track 1
             job['_duration'] = info['duration']
             os.remove(avi)                                   # only the encoder needed it
             moflex_in, existing = enc, read_trailer(enc)
-            n_stage = 3
+            n_stage = encode_versions(job, work, is3d, 3, total)
         else:
             is3d = (job.get('output') or ('3d' if info['moflex']['is3d'] else '2d')).lower() == '3d'
-            stages = ['super']
+            n_alt = len(versions_to_encode(job))
+            stages = ['avi', 'moflex'] * n_alt + ['super']
             emit('start', source=src, kind=kind, work=work, output='3d' if is3d else '2d', stages=stages,
                  duration=info['duration'])
+            check_fat32(estimate_size(job, info), 'The output would be about')
             moflex_in, existing = src, read_trailer(src)
-            n_stage = 1
+            n_stage = encode_versions(job, work, is3d, 1, 1 + 2 * n_alt)
         emit('stage', stage='super', index=n_stage, total=n_stage,
              text='Building the SUPER MOFLEX' if want_super else 'Finishing the moflex')
         with quiet_tools('super'):
             out, poster_full = assemble(job, moflex_in, existing, work, src, is3d)
+        check_fat32(os.path.getsize(out), 'The finished moflex')
 
         md = job.get('metadata')
         if job.get('output_name'):

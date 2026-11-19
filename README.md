@@ -79,6 +79,12 @@ Shows what was detected:
 
 The picture is always **letterboxed, never stretched**, so the aspect ratio is kept. Sources above 30 fps are halved (60 → 30).
 
+**Other versions of the film** (up to 3 besides the main one, e.g. a colour and a black-and-white master):
+- **Add file...** a video file (it's encoded exactly like the main one: same 2D/3D output and bitrate) or a moflex (used as it is; it must be the same size and 2D/3D mode).
+- Give each a **Name** of up to 7 characters (`B&W`, `COLOR`, `IMAX`), and name the main one too. That's what the player's **VIDEO > Version** row shows.
+- All versions must share one timeline: the player switches at the same moment. Each carries the same track 1 audio, so every audio track works with every version.
+- Each version adds roughly the main video's size again. Only the CLOWNSEC player sees them; the official viewer plays the main one.
+
 ### Audio
 
 | Video file input | Moflex / SUPER MOFLEX input |
@@ -88,8 +94,11 @@ The picture is always **letterboxed, never stretched**, so the aspect ratio is k
 - **Track 1** is the in-band audio that plays in **any** moflex player.
   - **Video input:** pick a source stream, **Other file...** (any video or audio file), or **Silent**.
   - **Moflex input:** **Keep as it is**, **Keep, but fix the loudness** (for quiet files), or **Other file...**.
-- **Track 2** is stored in the SUPER MOFLEX trailer. Only the CLOWNSEC player uses it; you switch to it there. Options are **None**, **Keep the current track 2**, a source stream, or **Other file...**.
+- **Tracks 2–8** are stored in the SUPER MOFLEX trailer. Only the CLOWNSEC player uses them; you switch in its SOUND menu.
+  - The list shows them in order. Every other audio stream in a video file is added automatically; a SUPER MOFLEX keeps the tracks it has.
+  - To add one, choose it in the box under the list (a track the file already has, a source stream, or **Other file...**), set its **Label** and click **Add track**. Select a row to change it, then **Update selected**. **Up/Down/Remove** manage the list.
   - **Label** is what the player shows (e.g. `JPN`, `COM` for commentary, `DUB`): 2–3 letters.
+  - Each track adds about 160 MB per hour.
 - **Offset** shifts an audio file that doesn't line up with the video, in seconds. Negative means the audio starts earlier.
 - Every new track is **loudness-normalized** (EBU R128, -16 LUFS), so tracks sound equally loud.
 
@@ -118,6 +127,9 @@ The picture is always **letterboxed, never stretched**, so the aspect ratio is k
 - **TV episodes:**
   1. Set **S** (season) and **E** (episode) *before* picking the show, so the episode title and description are fetched too.
   2. S and E are filled in automatically when the file name contains `S01E05` or `1x05`.
+  3. The file name always uses the two-digit form: `S01e05`, never `S1e5`, so episodes sort in the right order everywhere.
+- **Next episodes:** after you queue a TV episode, a box appears at the bottom of this tab: *Next episodes: use the info and poster of ...*. While it's ticked, every episode you open or drop next gets the same show title, year, genres, category, format and poster. Season and episode come from each file's name, or count up from the last one. If you picked the show from TMDB, each episode's title and description are fetched automatically. That makes a whole season one drag and drop. Untick it to stop. A movie file is never touched by it.
+- **Minutes** is filled in from the length of the file. TMDB's number is only used when the length can't be read.
 - **Category / Format:** where the CLOWNSEC catalog files it. Format is `converted` for 2D→3D conversions and `native` for real 3D.
 - **Poster:**
   - **Image...** uses your own picture. Use this for your "in 3D" artwork.
@@ -136,6 +148,7 @@ The picture is always **letterboxed, never stretched**, so the aspect ratio is k
   - Movies: `Title (YEAR) (3D) (S).moflex`
   - TV: `Show (YEAR) (3D) (S) - S01e05 - Episode Title.moflex`
 - **SUPER MOFLEX:** untick it for a plain moflex (track 1 only, no trailer).
+- **Over 4 GB:** a 3DS SD card is FAT32, which can't hold a file of 4 GB or more. Studio refuses such a job when you add it (and checks again before writing). Lower the bitrate, or drop audio tracks or versions.
 - **Replace the original file:** when editing a moflex in place. Otherwise, if the name would be the same, it's saved as `... (edited).moflex`.
 
 If you set a poster, a `.jpg` copy of it is saved next to the moflex.
@@ -146,6 +159,7 @@ If you set a poster, a `.jpg` copy of it is saved next to the moflex.
 
 - **TMDB token:** the *API Read Access Token* from <https://www.themoviedb.org/settings/api>. It's stored only in `app\settings.json` and never committed.
 - **Bitrate / Output folder:** defaults for new jobs.
+- **Remember the last output folder:** when ticked (the default), new jobs start in the folder you last used, even after closing and reopening the app. Untick it to always start at the *Output folder* above.
 - **Tools:** shows whether Python, ffmpeg, RunAsDate and the license were found. **Download missing tools** fetches Python and ffmpeg again.
 
 ---

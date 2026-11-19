@@ -269,16 +269,33 @@ namespace MoflexStudio
             }
             else
             {
-                cmbMode.Items.Add(new Item("None", "none"));
-                var a2 = J.G(J.G(probe, "moflex"), "audio2");
-                if (a2 != null)
-                    cmbMode.Items.Add(new Item(string.Format("Keep the current track 2  ({0}, {1} Hz, {2}:{3:00})", J.S(J.G(a2, "lang")), J.I(J.G(a2, "rate")),
-                        (int)J.F(J.G(a2, "seconds")) / 60, (int)J.F(J.G(a2, "seconds")) % 60), "keep"));
+                foreach (var a in J.A(J.G(J.G(probe, "moflex"), "audios")))
+                    cmbMode.Items.Add(new Item(KeepText(a), "keep:" + J.I(J.G(a, "existing"))));
                 if (kind == "video") foreach (var a in J.A(J.G(probe, "audio"))) cmbMode.Items.Add(new Item("Source " + StreamText(a), "src:" + J.I(J.G(a, "index"))));
                 cmbMode.Items.Add(new Item("Other file...", "file"));
             }
             cmbMode.SelectedIndex = cmbMode.Items.Count > 0 ? 0 : -1;
             ModeChanged();
+        }
+
+        public static string KeepText(object a)
+        {
+            int sec = (int)J.F(J.G(a, "seconds"));
+            return string.Format("Current track {0}: {1}  ({2} Hz, {3}:{4:00}:{5:00})", J.I(J.G(a, "existing")) + 2, J.S(J.G(a, "lang")),
+                J.I(J.G(a, "rate")), sec / 3600, sec / 60 % 60, sec % 60);
+        }
+
+        /* what a list row shows for the track this editor describes */
+        public string Describe()
+        {
+            string m = Mode;
+            if (m == "file")
+            {
+                var it = cmbStream.SelectedItem as Item;
+                return Path.GetFileName(txtFile.Text) + (it != null ? "  " + it.Text : "");
+            }
+            var mi = cmbMode.SelectedItem as Item;
+            return mi == null ? "" : mi.Text;
         }
 
         void SelectMode(string tag)
@@ -300,14 +317,18 @@ namespace MoflexStudio
             bool file = m == "file";
             txtFile.Enabled = btnFile.Enabled = cmbStream.Enabled = file;
             numOffset.Enabled = file || m.StartsWith("src:");
-            txtLang.Enabled = m != "none" && m != "silent" && m != "normalize" && !(m == "keep" && !second);
+            txtLang.Enabled = m != "none" && m != "silent" && m != "normalize" && !(m == "keep" && !second) && m != "";
             if (m.StartsWith("src:"))
             {
                 var a = FindStream(SourceProbe, int.Parse(m.Substring(4)));
                 txtLang.Text = Lang3(J.S(J.G(a, "lang")));
             }
-            else if (m == "keep" && second)
-                txtLang.Text = J.S(J.G(J.G(J.G(SourceProbe, "moflex"), "audio2"), "lang"));
+            else if (m.StartsWith("keep:"))
+            {
+                int k = int.Parse(m.Substring(5));
+                var a = J.A(J.G(J.G(SourceProbe, "moflex"), "audios")).FirstOrDefault(x => J.I(J.G(x, "existing")) == k);
+                txtLang.Text = J.S(J.G(a, "lang"));
+            }
             else if (m == "keep" || m == "normalize")
                 txtLang.Text = J.S(J.G(J.G(SourceProbe, "moflex"), "lang_main"));
             else if (m == "none" || m == "silent") txtLang.Text = "";
@@ -357,7 +378,8 @@ namespace MoflexStudio
             string lang = txtLang.Text.Trim().ToLower();
             if (m == "none" || m == "") return null;
             if (m == "silent") return d;
-            if (m == "keep") { d["keep"] = true; if (second && lang != "") d["label"] = lang; return d; }
+            if (m == "keep") { d["keep"] = true; return d; }
+            if (m.StartsWith("keep:")) { d["keep"] = int.Parse(m.Substring(5)); if (lang != "") d["label"] = lang; return d; }
             if (m == "normalize") { d["normalize"] = true; return d; }
             if (m.StartsWith("src:")) { d["file"] = null; d["stream"] = int.Parse(m.Substring(4)); }
             else { d["file"] = txtFile.Text; d["stream"] = J.I(J.G(((Item)cmbStream.SelectedItem).Tag, "index")); }
@@ -370,8 +392,15 @@ namespace MoflexStudio
 
         public async Task FromJson(object o)
         {
-            if (o == null) { SelectMode(second ? "none" : "silent"); return; }
-            if (J.B(J.G(o, "keep"))) { SelectMode("keep"); if (J.Has(o, "label")) txtLang.Text = J.S(J.G(o, "label")).ToUpper(); return; }
+            if (o == null) { if (second) { if (cmbMode.Items.Count > 0) cmbMode.SelectedIndex = 0; } else SelectMode("silent"); return; }
+            if (second && J.Has(o, "keep"))
+            {
+                object kv = J.G(o, "keep");
+                SelectMode("keep:" + (kv is bool ? 0 : J.I(kv)));
+                if (J.Has(o, "label")) txtLang.Text = J.S(J.G(o, "label")).ToUpper();
+                return;
+            }
+            if (J.B(J.G(o, "keep"))) { SelectMode("keep"); return; }
             if (J.B(J.G(o, "normalize"))) { SelectMode("normalize"); return; }
             if (!J.Has(o, "stream")) { SelectMode("silent"); return; }
             string f = J.S(J.G(o, "file"));
@@ -407,17 +436,22 @@ namespace MoflexStudio
         double jobDuration; DateTime stageStart;
         string currentArtMode = "none", artUrl = "", artFile = "";
         string origShowDesc = "";
+        string curTmdbId = "";              // TMDB id of the show/movie picked in the editor
+        Dict showCarry;                     // the last queued TV episode's show info + poster, reused for the next episodes
         bool toolsReady;
 
         // editor controls
         TextBox txtSource; Label lblInfo; Button btnOpen;
         TabControl tabs;
         ComboBox cmbLayout; RadioButton rad3D, rad2D; NumericUpDown numBitrate; Label lblVideoNote;
-        AudioPicker audio1, audio2;
+        AudioPicker audio1, audio2;           // audio2 = the editor for one extra track (2..8)
+        ListView lvAud; Label lblAudCount;
+        ListView lvVer; TextBox txtVerLabel, txtMainLabel; ComboBox cmbVerLayout;
         ListView lvSubs; ComboBox cmbSubFrom; TextBox txtSubLabel; NumericUpDown numSubOffset; Label lblSubCount;
         ComboBox cmbKind, cmbResults, cmbCategory, cmbFormat; TextBox txtQuery, txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc;
         NumericUpDown numS, numE; PictureBox picArt; Label lblArt; Button btnArtKeep;
         TextBox txtOutDir, txtOutName; Label lblAutoName; CheckBox chkSuper, chkOverwrite;
+        CheckBox chkCarry, chkRememberOut;
         TextBox txtToken, txtDefOut; NumericUpDown numDefBitrate; Label lblTools; Button btnDownload;
         Button btnAdd, btnClear, btnCancelEdit; Label lblEditing;
         // queue + progress
@@ -497,21 +531,67 @@ namespace MoflexStudio
             L(tVideo, "Bitrate", 10, 78, 100);
             numBitrate = Add(tVideo, new NumericUpDown { Left = 112, Top = 78, Width = 80, Minimum = 200, Maximum = 8000, Increment = 100, Value = 1400 });
             L(tVideo, "kbps", 196, 78, 40);
-            lblVideoNote = Note(tVideo, "", 10, 116, 576, 280);
+            lblVideoNote = Note(tVideo, "", 10, 110, 576, 104);
+            var grpVer = Add(tVideo, new GroupBox { Text = "Other versions of the film  (CLOWNSEC player: VIDEO > Version)", Left = 8, Top = 216, Width = 580, Height = 196 });
+            lvVer = new ListView { Left = 8, Top = 20, Width = 460, Height = 100, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
+            lvVer.Columns.Add("#", 28); lvVer.Columns.Add("Name", 70); lvVer.Columns.Add("From", 340);
+            var bVerAdd = new Button { Text = "Add file...", Left = 474, Top = 19, Width = 98 };
+            var bVerRm = new Button { Text = "Remove", Left = 474, Top = 47, Width = 98 };
+            var bVerUp = new Button { Text = "Up", Left = 474, Top = 75, Width = 47 };
+            var bVerDn = new Button { Text = "Down", Left = 525, Top = 75, Width = 47 };
+            var lVn = new Label { Text = "Name", Left = 8, Top = 132, Width = 40 };
+            txtVerLabel = new TextBox { Left = 50, Top = 128, Width = 70, MaxLength = 7 };
+            var lVl = new Label { Text = "Layout", Left = 130, Top = 132, Width = 46 };
+            cmbVerLayout = new ComboBox { Left = 178, Top = 128, Width = 150, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbVerLayout.Items.AddRange(new object[] { new Item("Auto", "auto"), new Item("2D", "2d"), new Item("Half SBS", "hsbs"), new Item("Full SBS", "fsbs") });
+            cmbVerLayout.SelectedIndex = 0;
+            var bVerUpd = new Button { Text = "Update selected", Left = 336, Top = 127, Width = 132 };
+            var lMain = new Label { Text = "This (main) version's name", Left = 8, Top = 164, Width = 160 };
+            txtMainLabel = new TextBox { Left = 170, Top = 160, Width = 70, MaxLength = 7 };
+            var nVer = new Label { Text = "Same film, same timeline (e.g. COLOR + B&W). Video files are encoded like the main one; a moflex is used as it is.",
+                Left = 248, Top = 156, Width = 324, Height = 34, ForeColor = SystemColors.GrayText };
+            grpVer.Controls.AddRange(new Control[] { lvVer, bVerAdd, bVerRm, bVerUp, bVerDn, lVn, txtVerLabel, lVl, cmbVerLayout, bVerUpd, lMain, txtMainLabel, nVer });
+            bVerAdd.Click += delegate { AddVersionFromUi(); };
+            bVerRm.Click += delegate { if (lvVer.SelectedItems.Count > 0) { lvVer.Items.Remove(lvVer.SelectedItems[0]); RenumberList(lvVer); } };
+            bVerUp.Click += delegate { MoveRow(lvVer, -1); }; bVerDn.Click += delegate { MoveRow(lvVer, 1); };
+            bVerUpd.Click += delegate { UpdateSelectedVersion(); };
+            lvVer.SelectedIndexChanged += delegate
+            {
+                if (lvVer.SelectedItems.Count == 0) return;
+                var d = (Dict)lvVer.SelectedItems[0].Tag;
+                txtVerLabel.Text = J.S(J.G(d, "label"));
+                SelectItem(cmbVerLayout, J.S(J.G(d, "source_type")) == "" ? "auto" : J.S(J.G(d, "source_type")));
+            };
             rad3D.CheckedChanged += delegate { UpdateVideoNote(); UpdateAutoName(); };
             cmbLayout.SelectedIndexChanged += delegate { UpdateVideoNote(); };
 
             // ---- Audio
             audio1 = new AudioPicker("Track 1  (in the video stream, plays everywhere)", false, 8, 8);
-            audio2 = new AudioPicker("Track 2  (SUPER MOFLEX trailer, CLOWNSEC player only)", true, 8, 134);
+            lvAud = Add(tAudio, new ListView { Left = 8, Top = 132, Width = 496, Height = 104, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false });
+            lvAud.Columns.Add("#", 28); lvAud.Columns.Add("Label", 50); lvAud.Columns.Add("From", 340); lvAud.Columns.Add("Offset", 60);
+            var bAUp = Add(tAudio, new Button { Text = "Up", Left = 510, Top = 132, Width = 78 });
+            var bADn = Add(tAudio, new Button { Text = "Down", Left = 510, Top = 160, Width = 78 });
+            var bARm = Add(tAudio, new Button { Text = "Remove", Left = 510, Top = 188, Width = 78 });
+            lblAudCount = Note(tAudio, "Tracks 2-8: 0 / 7", 510, 216, 80, 20);
+            audio2 = new AudioPicker("Add or edit a track  (2-8: SUPER MOFLEX trailer, CLOWNSEC player only)", true, 8, 240);
             foreach (var ap in new[] { audio1, audio2 })
             {
                 ap.ProbeFile = ProbeDict; ap.Status = SetStatus;
                 tAudio.Controls.Add(ap.Box);
             }
-            Note(tAudio, "Track 1 is always loudness-normalised (EBU R128, -16 LUFS) when it comes from a file or stream, and so is track 2. " +
-                "Use the offset to shift an audio file that starts earlier (negative) or later (positive) than the video. " +
-                "The label is what the player shows for track 2 (e.g. JPN, COM, DUB).", 10, 262, 576, 60);
+            var bAAdd = Add(tAudio, new Button { Text = "Add track", Left = 8, Top = 362, Width = 96, Height = 25 });
+            var bAUpd = Add(tAudio, new Button { Text = "Update selected", Left = 110, Top = 362, Width = 128, Height = 25 });
+            Note(tAudio, "Every new track is loudness-normalised (EBU R128, -16 LUFS). Offset shifts an audio file (negative = starts earlier). " +
+                "The label is what the player shows (JPN, COM, DUB...).", 246, 360, 342, 44);
+            bAUp.Click += delegate { MoveRow(lvAud, -1); }; bADn.Click += delegate { MoveRow(lvAud, 1); };
+            bARm.Click += delegate { if (lvAud.SelectedItems.Count > 0) { lvAud.Items.Remove(lvAud.SelectedItems[0]); RenumberAud(); } };
+            bAAdd.Click += delegate { AddAudFromUi(false); };
+            bAUpd.Click += delegate { AddAudFromUi(true); };
+            lvAud.SelectedIndexChanged += async delegate
+            {
+                if (lvAud.SelectedItems.Count == 0) return;
+                await audio2.FromJson(lvAud.SelectedItems[0].Tag);
+            };
 
             // ---- Subtitles
             lvSubs = Add(tSubs, new ListView { Left = 8, Top = 8, Width = 496, Height = 268, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false });
@@ -574,6 +654,10 @@ namespace MoflexStudio
             L(tInfo, "Description", 8, ly + 140, 80);
             txtDesc = Add(tInfo, new TextBox { Left = 8, Top = ly + 160, Width = 426, Height = 128, Multiline = true, ScrollBars = ScrollBars.Vertical });
             Note(tInfo, "Leave the title empty to keep the file's current info.", 8, ly + 292, 426, 18);
+            chkCarry = Add(tInfo, new CheckBox { Left = 8, Top = ly + 312, Width = 580, Height = 22, Checked = true, Visible = false });
+            tips.SetToolTip(chkCarry, "After you queue a TV episode, the next files you open or drop get the same show title, year, genres, category, format and poster.\n" +
+                "Season and episode come from each file name (S01E05 / 1x05), or count up from the last one. With a TMDB pick, each episode's title and description are fetched too.");
+            tips.SetToolTip(txtRuntime, "Filled in from the length of the file. Change it only if you want a different number.");
             picArt = Add(tInfo, new PictureBox { Left = 448, Top = ly, Width = 132, Height = 188, BorderStyle = BorderStyle.FixedSingle, SizeMode = PictureBoxSizeMode.StretchImage, BackColor = Color.FromArgb(40, 40, 40) });
             var bImg = Add(tInfo, new Button { Text = "Image...", Left = 448, Top = ly + 194, Width = 64 });
             var bNone = Add(tInfo, new Button { Text = "None", Left = 516, Top = ly + 194, Width = 64 });
@@ -622,9 +706,10 @@ namespace MoflexStudio
             txtDefOut = Add(tSet, new TextBox { Left = 108, Top = 112, Width = 436 });
             var bDefOut = Add(tSet, new Button { Text = "...", Left = 548, Top = 111, Width = 34, Height = 25 });
             bDefOut.Click += delegate { var p = PickFolder(txtDefOut.Text); if (p != null) txtDefOut.Text = p; };
-            var bSave = Add(tSet, new Button { Text = "Save settings", Left = 108, Top = 146, Width = 120, Height = 27 });
+            chkRememberOut = Add(tSet, new CheckBox { Text = "Remember the last output folder (unticked: always start at the folder above)", Left = 108, Top = 142, Width = 478, Checked = true });
+            var bSave = Add(tSet, new Button { Text = "Save settings", Left = 108, Top = 170, Width = 120, Height = 27 });
             bSave.Click += delegate { SaveSettings(); SetStatus("Settings saved."); };
-            var grp = Add(tSet, new GroupBox { Text = "Tools", Left = 8, Top = 190, Width = 578, Height = 210 });
+            var grp = Add(tSet, new GroupBox { Text = "Tools", Left = 8, Top = 210, Width = 578, Height = 196 });
             lblTools = new Label { Left = 12, Top = 22, Width = 556, Height = 120, Font = new Font("Consolas", 9f) };
             grp.Controls.Add(lblTools);
             btnDownload = new Button { Text = "Download missing tools", Left = 12, Top = 150, Width = 180, Height = 27 };
@@ -733,6 +818,21 @@ namespace MoflexStudio
             txtToken.Text = J.S(J.G(settings, "tmdb_token"));
             int br = J.I(J.G(settings, "default_bitrate")); if (br >= 200) numDefBitrate.Value = Math.Min(8000, br);
             txtDefOut.Text = J.S(J.G(settings, "default_output"));
+            chkRememberOut.Checked = !J.Has(settings, "remember_output") || J.B(J.G(settings, "remember_output"));
+        }
+
+        // where a new job's output goes: the last folder used (if remembered), else the default from Settings
+        string DefaultOutDir()
+        {
+            if (chkRememberOut != null && chkRememberOut.Checked && J.Has(settings, "last_output")) return J.S(J.G(settings, "last_output"));
+            return txtDefOut.Text.Trim();
+        }
+
+        void RememberOutDir(string dir)
+        {
+            if (!chkRememberOut.Checked || (J.Has(settings, "last_output") && J.S(J.G(settings, "last_output")) == dir)) return;
+            settings["last_output"] = dir;
+            try { SaveSettings(); } catch { }
         }
 
         void SaveSettings()
@@ -740,6 +840,7 @@ namespace MoflexStudio
             settings["tmdb_token"] = txtToken.Text.Trim();
             settings["default_bitrate"] = (int)numDefBitrate.Value;
             settings["default_output"] = txtDefOut.Text.Trim();
+            settings["remember_output"] = chkRememberOut.Checked;
             File.WriteAllText(settingsPath, J.Dump(settings), new UTF8Encoding(false));
         }
 
@@ -862,6 +963,7 @@ namespace MoflexStudio
                 {
                     var pr = await ProbeDict(f);
                     var job = DefaultJob(pr);
+                    await ApplyShowCarry(pr, job);
                     AddQueueItem(new QItem { Job = job, Probe = pr });
                 }
                 catch (Exception ex) { Log("! " + Path.GetFileName(f) + ": " + ex.Message); }
@@ -891,16 +993,19 @@ namespace MoflexStudio
                 {
                     string ml = J.S(J.G(main, "lang")); if (ml == "und" || ml == "") ml = "eng";
                     aud["main"] = new Dict { { "file", null }, { "stream", J.I(J.G(main, "index")) }, { "offset", 0.0 }, { "lang", ml.Substring(0, Math.Min(3, ml.Length)) } };
-                    string mlang = J.S(J.G(main, "lang"));
-                    var sec = streams.FirstOrDefault(a => a != main && J.S(J.G(a, "lang")) != mlang && J.S(J.G(a, "lang")) != "und" && J.S(J.G(a, "lang")) != "");
-                    if (sec != null)
+                    // every other audio stream becomes track 2, 3, ... (up to 7): reorder or remove them on the Audio tab
+                    var extra = new List<object>();
+                    foreach (var au in streams)
                     {
-                        string sl = J.S(J.G(sec, "lang")); sl = sl.Substring(0, Math.Min(3, sl.Length));
-                        aud["second"] = new Dict { { "file", null }, { "stream", J.I(J.G(sec, "index")) }, { "offset", 0.0 }, { "lang", sl }, { "label", sl } };
+                        if (au == main || extra.Count >= MaxExtraAudio) continue;
+                        string sl = J.S(J.G(au, "lang")).ToLowerInvariant(), t = J.S(J.G(au, "title")).ToLowerInvariant();
+                        string lbl = t.Contains("comment") ? "com" : (Regex.IsMatch(sl, "^[a-z][a-z0-9]{1,2}$") && sl != "und" ? sl : "a" + (extra.Count + 2));
+                        extra.Add(new Dict { { "file", null }, { "stream", J.I(J.G(au, "index")) }, { "offset", 0.0 }, { "lang", lbl }, { "label", lbl },
+                            { "desc", string.Format("Source #{0}  {1}  {2} {3}ch  {4}", J.I(J.G(au, "index")), J.S(J.G(au, "lang")).ToUpper(), J.S(J.G(au, "codec")), J.I(J.G(au, "channels")), J.S(J.G(au, "title"))).Trim() } });
                     }
-                    else aud["second"] = null;
+                    aud["extra"] = extra.ToArray();
                 }
-                else aud["main"] = new Dict();
+                else { aud["main"] = new Dict(); aud["extra"] = new object[0]; }
                 var subs = new List<object>();
                 foreach (var s in J.A(J.G(pr, "subtitles")))
                 {
@@ -923,13 +1028,18 @@ namespace MoflexStudio
                 md["season_episode"] = se.Length == 2 ? new object[] { J.I(se[0]), J.I(se[1]) } : null;
                 md["category"] = se.Length == 2 ? "TV Shows" : "Movies";
                 md["format"] = "converted";
+                md["runtime"] = Minutes(pr);
                 job["metadata"] = md;
             }
             else
             {
                 var mf = J.G(pr, "moflex");
                 aud["main"] = new Dict { { "keep", true } };
-                aud["second"] = J.G(mf, "audio2") != null ? (object)new Dict { { "keep", true } } : null;
+                aud["extra"] = J.A(J.G(mf, "audios")).Select(a => (object)new Dict { { "keep", J.I(J.G(a, "existing")) },
+                    { "label", J.S(J.G(a, "lang")).ToLowerInvariant() }, { "desc", AudioPicker.KeepText(a) } }).ToArray();
+                job["versions"] = J.A(J.G(mf, "videos")).Select(v => (object)new Dict { { "existing", J.I(J.G(v, "existing")) },
+                    { "label", J.S(J.G(v, "label")) }, { "desc", "Current version " + (J.I(J.G(v, "existing")) + 2) } }).ToArray();
+                job["main_label"] = J.S(J.G(mf, "vid_main"));
                 var subs = new List<object>();
                 foreach (var s in J.A(J.G(mf, "subs")))
                     subs.Add(new Dict { { "existing", J.I(J.G(s, "existing")) }, { "label", J.S(J.G(s, "label")) }, { "offset", 0.0 },
@@ -941,7 +1051,7 @@ namespace MoflexStudio
                 {
                     var md = new Dict();
                     foreach (var k in new[] { "title", "genres", "date", "desc", "showdesc", "category", "format" }) md[k] = J.S(J.G(nfo, k));
-                    md["year"] = J.I(J.G(nfo, "year")); md["runtime"] = J.I(J.G(nfo, "runtime"));
+                    md["year"] = J.I(J.G(nfo, "year")); md["runtime"] = J.I(J.G(nfo, "runtime")) > 0 ? J.I(J.G(nfo, "runtime")) : Minutes(pr);
                     var se = J.A(J.G(parsed, "season_episode"));
                     md["season_episode"] = se.Length == 2 ? new object[] { J.I(se[0]), J.I(se[1]) } : null;
                     var m = Regex.Match(Path.GetFileNameWithoutExtension(src), @"S\d+e\d+ - (.+)$", RegexOptions.IgnoreCase);
@@ -956,7 +1066,7 @@ namespace MoflexStudio
                 }
             }
             job["super"] = true;
-            job["output_dir"] = txtDefOut.Text.Trim();
+            job["output_dir"] = DefaultOutDir();
             job["output_name"] = "";
             job["overwrite"] = false;
             return job;
@@ -999,8 +1109,11 @@ namespace MoflexStudio
             Dict pr;
             try { pr = await ProbeDict(path); }
             catch (Exception ex) { SetStatus("Could not read " + Path.GetFileName(path) + ": " + ex.Message); return; }
-            await LoadIntoEditor(pr, job ?? DefaultJob(pr));
-            SetStatus("");
+            bool fresh = job == null;
+            if (fresh) { job = DefaultJob(pr); await ApplyShowCarry(pr, job); }
+            await LoadIntoEditor(pr, job);
+            SetStatus(fresh && showCarry != null && chkCarry.Checked && J.S(J.G(J.G(job, "metadata"), "title")) == J.S(J.G(showCarry, "title"))
+                ? "Filled in from " + J.S(J.G(showCarry, "title")) + " (untick the box on Info + poster to stop)." : "");
         }
 
         async Task LoadIntoEditor(Dict pr, Dict job)
@@ -1041,7 +1154,21 @@ namespace MoflexStudio
             // audio
             audio1.Setup(pr); audio2.Setup(pr);
             await audio1.FromJson(J.G(J.G(job, "audio"), "main"));
-            await audio2.FromJson(J.G(J.G(job, "audio"), "second"));
+            lvAud.Items.Clear();
+            var ja = J.G(job, "audio");
+            if (J.Has(ja, "extra")) foreach (var x in J.A(J.G(ja, "extra"))) { var d = J.D(x); if (d != null) AddAudRow(J.Clone(d)); }
+            else if (J.D(J.G(ja, "second")) != null)                 // a job saved by an older build
+            {
+                var d = J.Clone(J.D(J.G(ja, "second")));
+                if (J.G(d, "keep") is bool) d["keep"] = 0;
+                AddAudRow(d);
+            }
+            RenumberAud();
+            await audio2.FromJson(null);
+            lvVer.Items.Clear();
+            foreach (var x in J.A(J.G(job, "versions"))) { var d = J.D(x); if (d != null) AddVerRow(J.Clone(d)); }
+            RenumberList(lvVer);
+            txtMainLabel.Text = J.S(J.G(job, "main_label")); txtVerLabel.Text = ""; cmbVerLayout.SelectedIndex = 0;
 
             // subtitles
             cmbSubFrom.Items.Clear();
@@ -1071,7 +1198,8 @@ namespace MoflexStudio
             txtEpTitle.Text = J.S(J.G(md, "eptitle"));
             txtGenres.Text = J.S(J.G(md, "genres"));
             int y = J.I(J.G(md, "year")); txtYear.Text = y > 0 ? y.ToString() : "";
-            int rt = J.I(J.G(md, "runtime")); txtRuntime.Text = rt > 0 ? rt.ToString() : "";
+            int rt = J.I(J.G(md, "runtime")); if (rt <= 0) rt = Minutes(pr); txtRuntime.Text = rt > 0 ? rt.ToString() : "";
+            curTmdbId = J.S(J.G(md, "tmdb_id"));
             txtDate.Text = J.S(J.G(md, "date"));
             txtDesc.Text = J.S(J.G(md, "desc")).Replace("\r", "").Replace("\n", "\r\n");
             origShowDesc = J.S(J.G(md, "showdesc"));
@@ -1128,6 +1256,120 @@ namespace MoflexStudio
             else if (lay != "2d") s += "2D from a side-by-side source: only the left eye is used.";
             else s += "2D: lossless 400x240 AVI, then the official Mobiclip encoder (2 passes).";
             lblVideoNote.Text = s;
+        }
+
+        // ---- shared list helpers
+        void RenumberList(ListView lv)
+        {
+            for (int i = 0; i < lv.Items.Count; i++) lv.Items[i].Text = (i + 2).ToString();   // track / version 2, 3, ...
+        }
+
+        void MoveRow(ListView lv, int dir)
+        {
+            if (lv.SelectedItems.Count == 0) return;
+            var it = lv.SelectedItems[0]; int i = it.Index, j = i + dir;
+            if (j < 0 || j >= lv.Items.Count) return;
+            lv.Items.RemoveAt(i); lv.Items.Insert(j, it); it.Selected = true;
+            if (lv == lvAud) RenumberAud(); else RenumberList(lv);
+        }
+
+        // ---- extra audio tracks (2..8)
+        const int MaxExtraAudio = 7;
+
+        static string AudDesc(Dict d, Dict pr)
+        {
+            if (J.Has(d, "desc")) return J.S(d["desc"]);
+            if (J.Has(d, "keep"))
+            {
+                object kv = d["keep"]; int k = kv is bool ? 0 : J.I(kv);
+                var a = J.A(J.G(J.G(pr, "moflex"), "audios")).FirstOrDefault(x => J.I(J.G(x, "existing")) == k);
+                return a != null ? AudioPicker.KeepText(a) : "Current track " + (k + 2);
+            }
+            string f = J.S(J.G(d, "file"));
+            return (f == "" ? "Source" : Path.GetFileName(f)) + " stream #" + J.I(J.G(d, "stream"));
+        }
+
+        void AddAudRow(Dict d)
+        {
+            var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")).ToUpper(), AudDesc(d, probe),
+                J.F(J.G(d, "offset")) == 0 ? "" : J.F(J.G(d, "offset")).ToString("0.###", J.CI) });
+            lvi.Tag = d; lvAud.Items.Add(lvi);
+        }
+
+        void RenumberAud()
+        {
+            RenumberList(lvAud);
+            lblAudCount.Text = "Tracks 2-8: " + lvAud.Items.Count + " / " + MaxExtraAudio;
+            lblAudCount.ForeColor = lvAud.Items.Count > MaxExtraAudio ? Color.Firebrick : SystemColors.GrayText;
+        }
+
+        void AddAudFromUi(bool update)
+        {
+            if (probe == null) { SetStatus("Open a source file first."); return; }
+            string err = audio2.Validate(); if (err != null) { SetStatus(err); return; }
+            var d = audio2.ToJson() as Dict;
+            if (d == null || d.Count == 0) { SetStatus("Choose where the track comes from first."); return; }
+            if (!J.Has(d, "label") || J.S(d["label"]) == "") d["label"] = J.Has(d, "lang") ? J.S(d["lang"]) : "alt";
+            d["desc"] = audio2.Describe();
+            if (update)
+            {
+                if (lvAud.SelectedItems.Count == 0) { SetStatus("Select a track in the list first."); return; }
+                var it = lvAud.SelectedItems[0];
+                it.Tag = d; it.SubItems[1].Text = J.S(d["label"]).ToUpper(); it.SubItems[2].Text = J.S(d["desc"]);
+                it.SubItems[3].Text = J.F(J.G(d, "offset")) == 0 ? "" : J.F(J.G(d, "offset")).ToString("0.###", J.CI);
+                return;
+            }
+            if (lvAud.Items.Count >= MaxExtraAudio) { SetStatus("The player holds 8 audio tracks: track 1 plus 7 more."); return; }
+            AddAudRow(d); RenumberAud();
+        }
+
+        // ---- alternate video versions
+        const int MaxVersions = 3;
+
+        static string VerLabelCheck(string l, string fallback)
+        {
+            l = (l ?? "").Trim(); if (l == "") l = fallback;
+            return Regex.IsMatch(l, "^[ -~]{1,7}$") ? l : null;   // the player's font: plain ASCII, 7 characters
+        }
+
+        void AddVerRow(Dict d)
+        {
+            string desc = J.Has(d, "desc") ? J.S(d["desc"]) : J.Has(d, "existing") && !J.Has(d, "source")
+                ? "Current version " + (J.I(d["existing"]) + 2) : Path.GetFileName(J.S(J.G(d, "source")));
+            var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")), desc }); lvi.Tag = d; lvVer.Items.Add(lvi);
+        }
+
+        void AddVersionFromUi()
+        {
+            if (probe == null) { SetStatus("Open a source file first."); return; }
+            if (lvVer.Items.Count >= MaxVersions) { SetStatus("The player holds 4 versions: this one plus 3 more."); return; }
+            string f;
+            using (var d = new OpenFileDialog { Title = "Another version of the same film (video file or moflex)",
+                Filter = "Video|*" + string.Join(";*", VideoExt) + "|All files|*.*" })
+            {
+                try { d.InitialDirectory = Path.GetDirectoryName(J.S(J.G(probe, "path"))); } catch { }
+                if (d.ShowDialog() != DialogResult.OK) return;
+                f = d.FileName;
+            }
+            string l = VerLabelCheck(txtVerLabel.Text, "V" + (lvVer.Items.Count + 2));
+            if (l == null) { SetStatus("A version name is up to 7 plain characters (e.g. B&W, COLOR, IMAX)."); return; }
+            bool mf = f.EndsWith(".moflex", StringComparison.OrdinalIgnoreCase);
+            var lit = cmbVerLayout.SelectedItem as Item;
+            var row = new Dict { { "source", f }, { "label", l }, { "source_type", lit == null ? "auto" : (string)lit.Tag },
+                { "desc", Path.GetFileName(f) + (mf ? "  (moflex: used as it is)" : "  (encoded like the main one)") } };
+            AddVerRow(row); RenumberList(lvVer);
+            txtVerLabel.Text = "";
+        }
+
+        void UpdateSelectedVersion()
+        {
+            if (lvVer.SelectedItems.Count == 0) { SetStatus("Select a version in the list first."); return; }
+            var it = lvVer.SelectedItems[0]; var d = (Dict)it.Tag;
+            string l = VerLabelCheck(txtVerLabel.Text, J.S(J.G(d, "label")));
+            if (l == null) { SetStatus("A version name is up to 7 plain characters (e.g. B&W, COLOR, IMAX)."); return; }
+            d["label"] = l; it.SubItems[1].Text = l;
+            var lit = cmbVerLayout.SelectedItem as Item;
+            if (J.Has(d, "source")) d["source_type"] = lit == null ? "auto" : (string)lit.Tag;
         }
 
         // ---- subtitles tab
@@ -1228,6 +1470,71 @@ namespace MoflexStudio
             it.SubItems[1].Text = l.ToUpper(); it.SubItems[3].Text = J.F(d["offset"]) == 0 ? "" : J.F(d["offset"]).ToString("0.###", J.CI);
         }
 
+        // ---- runtime from the file itself
+        static int Minutes(Dict pr)
+        {
+            double d = J.F(J.G(pr, "duration"));
+            return d > 0 ? Math.Max(1, (int)Math.Round(d / 60.0)) : 0;
+        }
+
+        // ---- TV runs: the next episodes reuse the last queued episode's show info + poster
+        void CaptureShowCarry(Dict job)
+        {
+            var md = J.D(J.G(job, "metadata"));
+            if (md == null || J.S(J.G(md, "title")) == "") return;          // "keep the file's info": leave the run alone
+            var se = J.A(J.G(md, "season_episode"));
+            if (se.Length != 2) { showCarry = null; UpdateCarryBox(); return; }   // a movie ends the run
+            var c = new Dict();
+            foreach (var k in new[] { "title", "genres", "category", "format", "showdesc", "tmdb_id" }) c[k] = J.S(J.G(md, k));
+            c["year"] = J.I(J.G(md, "year"));
+            c["season"] = J.I(se[0]); c["episode"] = J.I(se[1]);
+            string a = J.S(J.G(job, "art"));
+            if (a != "" && a != "keep" && a != "none") c["art"] = a;
+            showCarry = c;
+            UpdateCarryBox();
+        }
+
+        void UpdateCarryBox()
+        {
+            chkCarry.Visible = showCarry != null;
+            if (showCarry == null) return;
+            chkCarry.Text = string.Format("Next episodes: use the info{0} of {1} ({2})   [last queued: S{3:00}e{4:00}]",
+                J.Has(showCarry, "art") ? " and poster" : "", J.S(J.G(showCarry, "title")), J.I(J.G(showCarry, "year")),
+                J.I(J.G(showCarry, "season")), J.I(J.G(showCarry, "episode")));
+        }
+
+        async Task ApplyShowCarry(Dict pr, Dict job)
+        {
+            if (showCarry == null || !chkCarry.Checked) return;
+            var md = J.D(J.G(job, "metadata"));
+            if (md == null) { md = new Dict(); job["metadata"] = md; }
+            if (J.B(J.G(md, "_from_file"))) return;                          // a SUPER MOFLEX with its own info: leave it
+            var se = J.A(J.G(J.G(pr, "parsed"), "season_episode"));
+            // only files that look like episodes: S01E05 / 1x05 in the name, or the show's own name -- never a movie dropped after a TV run
+            Func<string, string> norm = x => Regex.Replace(x.ToLowerInvariant(), "[^a-z0-9]", "");
+            string pt = norm(J.S(J.G(J.G(pr, "parsed"), "title"))), st = norm(J.S(J.G(showCarry, "title")));
+            if (se.Length != 2 && (pt == "" || st == "" || !(pt.Contains(st) || st.Contains(pt)))) return;
+            int s = se.Length == 2 ? J.I(se[0]) : J.I(J.G(showCarry, "season"));
+            int e = se.Length == 2 ? J.I(se[1]) : J.I(J.G(showCarry, "episode")) + 1;
+            foreach (var k in new[] { "title", "genres", "category", "format", "showdesc", "tmdb_id" }) md[k] = J.S(J.G(showCarry, k));
+            md["year"] = J.I(J.G(showCarry, "year"));
+            md["season_episode"] = new object[] { s, e };
+            md["eptitle"] = ""; md["date"] = ""; md["desc"] = J.S(J.G(showCarry, "showdesc"));
+            if (J.Has(showCarry, "art")) job["art"] = showCarry["art"];
+            showCarry["season"] = s; showCarry["episode"] = e;               // so a file without S/E in its name counts on
+            UpdateCarryBox();
+            string tid = J.S(J.G(showCarry, "tmdb_id"));
+            if (tid == "" || txtToken.Text.Trim() == "") return;
+            try
+            {
+                var d = await Backend.Call("tmdb-details", "tv", tid, s + ":" + e);
+                md["eptitle"] = J.S(J.G(d, "eptitle"));
+                md["date"] = J.S(J.G(d, "date"));
+                if (J.S(J.G(d, "eptitle")) != "") md["desc"] = J.S(J.G(d, "desc"));
+            }
+            catch (Exception ex) { Log(string.Format("! TMDB S{0:00}e{1:00}: {2}", s, e, ex.Message)); }
+        }
+
         // ---- info tab
         async Task TmdbSearch()
         {
@@ -1268,7 +1575,9 @@ namespace MoflexStudio
                 txtTitle.Text = J.S(J.G(d, "title"));
                 int y = J.I(J.G(d, "year")); txtYear.Text = y > 0 ? y.ToString() : "";
                 txtGenres.Text = J.S(J.G(d, "genres"));
-                int rt = J.I(J.G(d, "runtime")); txtRuntime.Text = rt > 0 ? rt.ToString() : "";
+                int rt = Minutes(probe); if (rt <= 0) rt = J.I(J.G(d, "runtime"));   // the file's real length beats TMDB's
+                txtRuntime.Text = rt > 0 ? rt.ToString() : "";
+                curTmdbId = J.S(J.G(it.Tag, "id"));
                 txtDate.Text = J.S(J.G(d, "date"));
                 txtDesc.Text = J.S(J.G(d, "desc"));
                 txtEpTitle.Text = J.S(J.G(d, "eptitle"));
@@ -1364,11 +1673,13 @@ namespace MoflexStudio
             cmbLayout.Items.Clear(); cmbLayout.Enabled = false;
             numBitrate.Value = numDefBitrate.Value; numBitrate.Enabled = false;
             audio1.Setup(null); audio2.Setup(null);
+            lvAud.Items.Clear(); RenumberAud(); lvVer.Items.Clear(); txtVerLabel.Text = ""; txtMainLabel.Text = "";
             lvSubs.Items.Clear(); cmbSubFrom.Items.Clear(); txtSubLabel.Text = ""; numSubOffset.Value = 0; RenumberSubs();
             foreach (var t in new[] { txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc, txtQuery, txtOutName }) t.Text = "";
             cmbResults.Items.Clear(); cmbCategory.Text = "Movies"; cmbFormat.SelectedIndex = 0; cmbKind.SelectedIndex = 0; numS.Value = numE.Value = 0;
             origShowDesc = ""; btnArtKeep.Enabled = false; SetArt("none", null);
-            txtOutDir.Text = txtDefOut.Text; chkSuper.Checked = true; chkOverwrite.Checked = false;
+            curTmdbId = "";
+            txtOutDir.Text = DefaultOutDir(); chkSuper.Checked = true; chkOverwrite.Checked = false;
             btnAdd.Text = "Add to queue"; btnCancelEdit.Visible = false; lblEditing.Text = "";
             UpdateVideoNote(); UpdateAutoName();
             if (tabs.SelectedIndex == 5 && toolsReady) tabs.SelectedIndex = 0;
@@ -1391,9 +1702,18 @@ namespace MoflexStudio
                 if (lay == "auto") lay = J.S(J.G(J.G(probe, "video"), "detected"));
                 if (lay == "2d") { error = "3D output needs a side-by-side source: set Video > Source layout to HSBS/FSBS or choose 2D."; tabs.SelectedIndex = 0; return null; }
             }
-            error = audio1.Validate() ?? audio2.Validate();
+            error = audio1.Validate();
             if (error != null) { tabs.SelectedIndex = 1; return null; }
-            job["audio"] = new Dict { { "main", audio1.ToJson() ?? new Dict() }, { "second", audio2.ToJson() } };
+            if (lvAud.Items.Count > MaxExtraAudio) { error = "At most 8 audio tracks (track 1 plus 7)."; tabs.SelectedIndex = 1; return null; }
+            job["audio"] = new Dict { { "main", audio1.ToJson() ?? new Dict() },
+                { "extra", lvAud.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray() } };
+            if (lvVer.Items.Count > MaxVersions) { error = "At most 4 video versions (this one plus 3)."; tabs.SelectedIndex = 0; return null; }
+            job["versions"] = lvVer.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray();
+            string ml = VerLabelCheck(txtMainLabel.Text, "-");
+            if (ml == null) { error = "The main version's name is up to 7 plain characters."; tabs.SelectedIndex = 0; return null; }
+            job["main_label"] = txtMainLabel.Text.Trim();
+            if (!chkSuper.Checked && (lvAud.Items.Count > 0 || lvVer.Items.Count > 0))
+            { error = "Extra audio tracks and video versions live in the SUPER MOFLEX trailer: tick SUPER MOFLEX on the Output tab, or remove them."; tabs.SelectedIndex = 4; return null; }
             if (lvSubs.Items.Count > 16) { error = "At most 16 subtitle tracks."; tabs.SelectedIndex = 2; return null; }
             job["subtitles"] = lvSubs.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray();
             if (txtTitle.Text.Trim() != "")
@@ -1407,6 +1727,7 @@ namespace MoflexStudio
                     { "desc", txtDesc.Text.Replace("\r\n", " ").Replace("\n", " ").Trim() }, { "showdesc", origShowDesc },
                     { "eptitle", tv ? txtEpTitle.Text.Trim() : "" }, { "format", cmbFormat.Text },
                     { "season_episode", tv && numS.Value > 0 && numE.Value > 0 ? new object[] { (int)numS.Value, (int)numE.Value } : null } };
+                if (curTmdbId != "") md["tmdb_id"] = curTmdbId;
                 job["metadata"] = md;
             }
             else job["metadata"] = null;
@@ -1422,7 +1743,27 @@ namespace MoflexStudio
                 try { Directory.CreateDirectory((string)job["output_dir"]); }
                 catch { error = "Output folder can't be created."; tabs.SelectedIndex = 4; return null; }
             }
-            if (kind == "video" && !File.Exists(Path.Combine(ToolPath("encoder_dir", Path.Combine(appDir, "encoder")), "MobiclipMulticoreEncoder.exe")))
+            // FAT32 (the 3DS SD card) can't hold a file of 4 GB or more: refuse up front, not after an hour of encoding
+            {
+                double dur = J.F(J.G(probe, "duration")), adpcm = 44100.0 / 1024 * (8 + 1024);   // bytes/s per ADPCM track
+                double est = kind == "video" ? (int)numBitrate.Value * 1000.0 / 8 * dur * 1.03 + adpcm * dur
+                                             : new FileInfo(J.S(J.G(probe, "path"))).Length;
+                foreach (var ex in J.A(J.G(J.G(job, "audio"), "extra"))) if (!J.Has(ex, "keep")) est += adpcm * dur;
+                foreach (var vx in J.A(J.G(job, "versions")))
+                {
+                    string vs = J.S(J.G(vx, "source"));
+                    if (vs == "") continue;   // a kept version is already counted in the file's size
+                    est += vs.EndsWith(".moflex", StringComparison.OrdinalIgnoreCase) && File.Exists(vs) ? new FileInfo(vs).Length
+                         : (int)numBitrate.Value * 1000.0 / 8 * dur * 1.03 + adpcm * dur;
+                }
+                if (est > 4294967295.0)
+                {
+                    error = string.Format("The output would be about {0:0.00} GB, over the 4 GB a 3DS (FAT32) SD card can hold. Lower the bitrate on the Video tab, or drop track 2.", est / 1073741824.0);
+                    tabs.SelectedIndex = 0; return null;
+                }
+            }
+            bool encodes = kind == "video" || J.A(job["versions"]).Any(vv => J.S(J.G(vv, "source")) != "" && !J.S(J.G(vv, "source")).EndsWith(".moflex", StringComparison.OrdinalIgnoreCase));
+            if (encodes && !File.Exists(Path.Combine(ToolPath("encoder_dir", Path.Combine(appDir, "encoder")), "MobiclipMulticoreEncoder.exe")))
             { error = "The Mobiclip encoder is missing (app\\encoder), so video files can't be converted."; return null; }
             return job;
         }
@@ -1440,6 +1781,8 @@ namespace MoflexStudio
             }
             else { AddQueueItem(new QItem { Job = job, Probe = probe }); SetStatus("Added to the queue."); }
             SaveQueue();
+            RememberOutDir(J.S(job["output_dir"]));
+            CaptureShowCarry(job);
             ClearEditor();
         }
 
@@ -1747,6 +2090,7 @@ namespace MoflexStudio
             running = null;
             SaveQueue();
             try { if (txtToken.Text.Trim() != J.S(J.G(settings, "tmdb_token"))) SaveSettings(); } catch { }
+            try { RememberOutDir(txtOutDir.Text.Trim()); } catch { }
         }
 
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool FlashWindow(IntPtr h, bool invert);
