@@ -713,6 +713,17 @@ def reaudio(moflex, wav, work):
         raise RuntimeError('replacing the in-band audio failed: ' + (r.stdout + r.stderr)[-500:])
     os.replace(tmp, moflex)
 
+def version_order(job, old_vids):
+    """the job's versions in output order: [{'self': True}...] marks this file's own video. Jobs from
+    before the main could move list only the alternates (the file's own video first, main_label)."""
+    vs = job.get('versions')
+    if vs is None:                                       # not specified: keep what the file has
+        vs = [{'existing': i} for i in range(len(old_vids))]
+    vs = [dict(v, _n=n) for n, v in enumerate(vs)]       # _n: the key encode_versions used
+    if not any(v.get('self') for v in vs):
+        vs = [{'self': True, 'label': job.get('main_label') or ''}] + vs
+    return vs
+
 def blocks_only(src, dst):
     """copy a moflex's block region (no CSXTRA trailer) -> dst"""
     t = read_trailer(src)
@@ -862,51 +873,68 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
             secs.append(adpcm_section(w2, it.get('label') or it.get('lang') or 'alt'))
             os.remove(w2)                               # an hour of PCM is ~600 MB: one at a time
 
-    # ---- alternate video versions (trailer): each a block-only moflex with the same track 1
+    # ---- video versions: the first is the main (the file's own blocks), the rest go in the trailer
     old_vids = [s for cc, s in existing['sections'] if cc == b'VID1']
-    versions = job.get('versions')
-    if versions is None:
-        versions = [{'existing': i} for i in range(len(old_vids))]
-    if len(versions) > MAX_VERSIONS:
-        raise RuntimeError(f'{len(versions) + 1} video versions -- the player holds at most {MAX_VERSIONS + 1}')
-    if versions:
-        mw, mh, mdur = video_shape(base)
+    order = version_order(job, old_vids)
+    n_alt = len(order) - 1
+    if n_alt > MAX_VERSIONS:
+        raise RuntimeError(f'{len(order)} video versions -- the player holds at most {MAX_VERSIONS + 1}')
+    main_blocks = base
+    if n_alt > 0:
         t1 = None
-        for n, v in enumerate(versions):
-            emit('progress', stage='super', pct=88 + 10 * n // len(versions), note=f'video version {n + 2}')
-            label = label8(v.get('label') or f'V{n + 2}')
+        def track1():                                   # what every version carries in-band
+            nonlocal t1
+            t1 = t1 or wav or track1_wav(base, work)    # base = this file's own video, track 1 final
+            return t1
+        built = []                                      # (label8, block-only moflex path or Sec)
+        for n, v in enumerate(order):
+            emit('progress', stage='super', pct=88 + 10 * n // len(order), note=f'video version {n + 1}')
+            label = label8(v.get('label') or ('' if n == 0 else f'V{n + 1}'))
+            if v.get('self'):
+                built.append((label, base)); continue
             if 'existing' in v and not v.get('source'):
                 k = int(v['existing'])
                 if k >= len(old_vids):
                     raise RuntimeError(f'the file has no video version {k + 2} to keep')
-                if not wav:                              # track 1 unchanged: copy it as it is
-                    secs.append(old_vids[k].relabel(8, label))
-                    continue
-                alt = os.path.join(work, f'alt{n}.moflex')
-                with open(alt, 'wb') as fo:              # track 1 changed: the alternate gets it too
+                if not wav and n > 0:                    # unchanged and still in the trailer: copy as it is
+                    built.append((label, old_vids[k].relabel(8, label))); continue
+                alt = os.path.join(work, f'ver{n}.moflex')
+                with open(alt, 'wb') as fo:
                     s = old_vids[k]
                     with open(s.path, 'rb') as fi:
                         fi.seek(s.off + 16); left = s.size - 16
                         while left > 0:
                             b = fi.read(min(left, 8 << 20)); fo.write(b); left -= len(b)
+                if not wav:                              # promoted to main, track 1 unchanged: it already has it
+                    built.append((label, alt)); continue
             else:
-                alt = (job.get('_alt_moflex') or {}).get(str(n)) or v['source']
-                alt = blocks_only(alt, os.path.join(work, f'alt{n}.moflex'))
-            aw, ah, adur = video_shape(alt)
+                src_v = (job.get('_alt_moflex') or {}).get(str(v.get('_n', n))) or v['source']
+                alt = blocks_only(src_v, os.path.join(work, f'ver{n}.moflex'))
+            reaudio(alt, track1(), work)
+            built.append((label, alt))
+        # every version: same size as the main one, and (warned) the same length
+        mpath = built[0][1] if isinstance(built[0][1], str) else None
+        mw, mh, mdur = video_shape(mpath or base)
+        for n, (label, pth) in enumerate(built[1:], 2):
+            if not isinstance(pth, str):
+                continue                                 # a kept trailer version was checked when it was made
+            aw, ah, adur = video_shape(pth)
             if (aw, ah) != (mw, mh):
-                raise RuntimeError(f'video version {n + 2} is {aw}x{ah} but the main one is {mw}x{mh}: '
-                                   'both must be encoded the same way (same 2D/3D output)')
+                raise RuntimeError(f'video version {n} is {aw}x{ah} but the main one is {mw}x{mh}: '
+                                   'all must be encoded the same way (same 2D/3D output)')
             if mdur and adur and abs(mdur - adur) > 2:
-                log(f'warning: video version {n + 2} runs {adur:.1f} s, the main one {mdur:.1f} s -- '
+                log(f'warning: video version {n} runs {adur:.1f} s, the main one {mdur:.1f} s -- '
                     'the player switches at the same time, so they should share one timeline', 'super')
-            t1 = t1 or wav or track1_wav(base, work)
-            reaudio(alt, t1, work)
-            secs.append(VidSec(alt, label))
-        secs.append(section(b'VLB0', label8(job.get('main_label') or '')))
+        main_blocks = built[0][1]
+        for label, pth in built[1:]:
+            secs.append(VidSec(pth, label) if isinstance(pth, str) else pth)
+        secs.append(section(b'VLB0', built[0][0]))
+        if main_blocks != base:
+            log(f'main version: {built[0][0].rstrip(bytes(1)).decode("utf-8", "replace") or "(unnamed)"}', 'super')
 
     # ---- write: blocks + sections + footer
     out = os.path.join(work, 'out.moflex')
-    with open(base, 'rb') as fi, open(out, 'wb') as fo:
+    with open(main_blocks, 'rb') as fi, open(out, 'wb') as fo:
         shutil.copyfileobj(fi, fo, 8 << 20)
         boff = fo.tell()
         for s in secs:
@@ -927,22 +955,24 @@ def versions_to_encode(job):
 def encode_versions(job, work, is3d, first_stage, total):
     """alternate versions given as video files: encoded exactly like the main one (same output, bitrate)"""
     out, i = {}, first_stage
+    # list rows are numbered as the UI shows them: with this file's own row in the list, row 1 is n=0
+    off = 1 if any(v.get('self') for v in job.get('versions') or []) else 2
     for n, v in versions_to_encode(job):
         vinfo = probe(v['source'])
         if not vinfo['video']:
-            raise RuntimeError(f'video version {n + 2}: no video stream in {os.path.basename(v["source"])}')
+            raise RuntimeError(f'video version {n + off}: no video stream in {os.path.basename(v["source"])}')
         layout = (v.get('source_type') or 'auto').lower()
         if layout == 'auto':
             layout = vinfo['video']['detected']
         if is3d and layout == '2d':
-            raise RuntimeError(f'video version {n + 2} is 2D but the output is 3D (set its layout to HSBS or FSBS)')
+            raise RuntimeError(f'video version {n + off} is 2D but the output is 3D (set its layout to HSBS or FSBS)')
         vj = dict(job, source=v['source'], output='3d' if is3d else '2d')
         wd = os.path.join(work, f'version{n}'); os.makedirs(wd, exist_ok=True)
-        emit('stage', stage='avi', index=i, total=total, text=f'Version {n + 2}: converting to lossless AVI')
+        emit('stage', stage='avi', index=i, total=total, text=f'Version {n + off}: converting to lossless AVI')
         avi = os.path.join(wd, 'moflex_job.avi')
         make_avi(vj, vinfo, layout, avi)
         emit('stage', stage='moflex', index=i + 1, total=total,
-             text=f"Version {n + 2}: encoding {vj['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
+             text=f"Version {n + off}: encoding {vj['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
         out[str(n)] = make_moflex(vj, avi, wd)
         os.remove(avi)
         i += 2

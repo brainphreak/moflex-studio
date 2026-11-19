@@ -10,6 +10,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -423,6 +424,9 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
+        const string AppVersion = "1.3";
+        // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
+        const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
         const string FfUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
@@ -446,13 +450,14 @@ namespace MoflexStudio
         ComboBox cmbLayout; RadioButton rad3D, rad2D; NumericUpDown numBitrate; Label lblVideoNote;
         AudioPicker audio1, audio2;           // audio2 = the editor for one extra track (2..8)
         ListView lvAud; Label lblAudCount;
-        ListView lvVer; TextBox txtVerLabel, txtMainLabel; ComboBox cmbVerLayout;
+        ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout;
         ListView lvSubs; ComboBox cmbSubFrom; TextBox txtSubLabel; NumericUpDown numSubOffset; Label lblSubCount;
         ComboBox cmbKind, cmbResults, cmbCategory, cmbFormat; TextBox txtQuery, txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc;
         NumericUpDown numS, numE; PictureBox picArt; Label lblArt; Button btnArtKeep;
         TextBox txtOutDir, txtOutName; Label lblAutoName; CheckBox chkSuper, chkOverwrite;
         CheckBox chkCarry, chkRememberOut;
         TextBox txtToken, txtDefOut; NumericUpDown numDefBitrate; Label lblTools; Button btnDownload;
+        Button btnUpdate; Label lblVersion; string updateVer, updateMd5;
         Button btnAdd, btnClear, btnCancelEdit; Label lblEditing;
         // queue + progress
         ListView lvQueue; Button btnStart, btnPause, btnStop, btnEdit, btnRemove, btnUp, btnDown, btnClearDone;
@@ -479,7 +484,9 @@ namespace MoflexStudio
             Shown += async delegate
             {
                 CleanStaleWork();
+                try { string ud = Path.Combine(appDir, "update"); if (Directory.Exists(ud)) Directory.Delete(ud, true); } catch { }   // a finished update's leftovers
                 await CheckTools(true);
+                await CheckUpdate(false);         // quiet: a status-bar note when there is a newer build
                 // files dropped on the exe: one -> editor, several -> queue; --queue forces queueing, --start runs the queue
                 var args = Environment.GetCommandLineArgs().Skip(1).ToList();
                 bool start = args.Remove("--start"), toQ = args.Remove("--queue");
@@ -546,13 +553,17 @@ namespace MoflexStudio
             cmbVerLayout.Items.AddRange(new object[] { new Item("Auto", "auto"), new Item("2D", "2d"), new Item("Half SBS", "hsbs"), new Item("Full SBS", "fsbs") });
             cmbVerLayout.SelectedIndex = 0;
             var bVerUpd = new Button { Text = "Update selected", Left = 336, Top = 127, Width = 132 };
-            var lMain = new Label { Text = "This (main) version's name", Left = 8, Top = 164, Width = 160 };
-            txtMainLabel = new TextBox { Left = 170, Top = 160, Width = 70, MaxLength = 7 };
-            var nVer = new Label { Text = "Same film, same timeline (e.g. COLOR + B&W). Video files are encoded like the main one; a moflex is used as it is.",
-                Left = 248, Top = 156, Width = 324, Height = 34, ForeColor = SystemColors.GrayText };
-            grpVer.Controls.AddRange(new Control[] { lvVer, bVerAdd, bVerRm, bVerUp, bVerDn, lVn, txtVerLabel, lVl, cmbVerLayout, bVerUpd, lMain, txtMainLabel, nVer });
+            var nVer = new Label { Text = "Row 1 is the MAIN version: the file's normal video, what every player shows. The others are for the CLOWNSEC player (VIDEO > Version). " +
+                "Same film, same timeline. Video files are encoded like the main one; a moflex is used as it is.",
+                Left = 8, Top = 156, Width = 564, Height = 34, ForeColor = SystemColors.GrayText };
+            grpVer.Controls.AddRange(new Control[] { lvVer, bVerAdd, bVerRm, bVerUp, bVerDn, lVn, txtVerLabel, lVl, cmbVerLayout, bVerUpd, nVer });
             bVerAdd.Click += delegate { AddVersionFromUi(); };
-            bVerRm.Click += delegate { if (lvVer.SelectedItems.Count > 0) { lvVer.Items.Remove(lvVer.SelectedItems[0]); RenumberList(lvVer); } };
+            bVerRm.Click += delegate
+            {
+                if (lvVer.SelectedItems.Count == 0) return;
+                if (J.B(J.G(lvVer.SelectedItems[0].Tag, "self"))) { SetStatus("This file's own video can't be removed; move another version above it to make that one the main."); return; }
+                lvVer.Items.Remove(lvVer.SelectedItems[0]); RenumberVer();
+            };
             bVerUp.Click += delegate { MoveRow(lvVer, -1); }; bVerDn.Click += delegate { MoveRow(lvVer, 1); };
             bVerUpd.Click += delegate { UpdateSelectedVersion(); };
             lvVer.SelectedIndexChanged += delegate
@@ -714,7 +725,10 @@ namespace MoflexStudio
             grp.Controls.Add(lblTools);
             btnDownload = new Button { Text = "Download missing tools", Left = 12, Top = 150, Width = 180, Height = 27 };
             var bAppDir = new Button { Text = "Open app folder", Left = 198, Top = 150, Width = 130, Height = 27 };
-            grp.Controls.Add(btnDownload); grp.Controls.Add(bAppDir);
+            btnUpdate = new Button { Text = "Check for updates", Left = 334, Top = 150, Width = 130, Height = 27 };
+            lblVersion = new Label { Text = "Version " + AppVersion, Left = 470, Top = 156, Width = 100, ForeColor = SystemColors.GrayText };
+            grp.Controls.Add(btnDownload); grp.Controls.Add(bAppDir); grp.Controls.Add(btnUpdate); grp.Controls.Add(lblVersion);
+            btnUpdate.Click += async delegate { await CheckUpdate(true); };
             btnDownload.Click += async delegate { await CheckTools(true); };
             bAppDir.Click += delegate { Process.Start("explorer.exe", Backend.Quote(appDir)); };
 
@@ -891,6 +905,107 @@ namespace MoflexStudio
             btnAdd.Enabled = btnStart.Enabled = btnOpen.Enabled = toolsReady && !queueActive;
             if (!toolsReady) { SetStatus("Python / ffmpeg missing: Settings > Download missing tools."); tabs.SelectedIndex = 5; }
             else if (lblStatus.Text == "" || lblStatus.Text.StartsWith("Tools")) SetStatus("Ready. " + (File.Exists(enc) ? "" : "(Mobiclip encoder missing: only moflex editing works.)"));
+        }
+
+        // ============================================================ self-update
+        static string Http(string url)
+        {
+            try { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)12288; }
+            catch { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; }
+            using (var wc = new WebClient())
+            {
+                wc.Headers[HttpRequestHeader.UserAgent] = "MoflexStudio/" + AppVersion;
+                wc.Headers[HttpRequestHeader.CacheControl] = "no-cache";
+                return wc.DownloadString(url + "?t=" + DateTime.UtcNow.Ticks);   // never a cached latest.txt
+            }
+        }
+
+        static bool Newer(string a, string b)   // a > b, "1.10" > "1.9"
+        {
+            Version va, vb;
+            if (!Version.TryParse(a, out va) || !Version.TryParse(b, out vb)) return false;
+            return va > vb;
+        }
+
+        async Task CheckUpdate(bool interactive)
+        {
+            string txt;
+            try { txt = await Task.Run(() => Http(UpdateBase + "latest.txt")); }
+            catch (Exception ex) { if (interactive) SetStatus("Couldn't check for updates: " + ex.Message); return; }
+            var lines = txt.Replace("\r", "").Split('\n').Select(l => l.Trim()).Where(l => l != "").ToArray();
+            if (lines.Length < 2 || !Regex.IsMatch(lines[1], "^[0-9a-fA-F]{32}$")) { if (interactive) SetStatus("The update information on the server is unreadable."); return; }
+            updateVer = lines[0]; updateMd5 = lines[1].ToLowerInvariant();
+            if (!Newer(updateVer, AppVersion))
+            {
+                lblVersion.Text = "Version " + AppVersion;
+                if (interactive) SetStatus("Moflex Studio " + AppVersion + " is the newest version.");
+                return;
+            }
+            lblVersion.Text = AppVersion + " -> " + updateVer;
+            btnUpdate.Text = "Update to " + updateVer;
+            if (!interactive) { SetStatus("Moflex Studio " + updateVer + " is available: Settings > Update to " + updateVer + "."); return; }
+            if (queueActive) { SetStatus("Finish or stop the queue first: updating restarts the app."); return; }
+            if (MessageBox.Show(this, "Moflex Studio " + updateVer + " is available (you have " + AppVersion + ").\n\n" +
+                "Update now? It downloads the new version (about 10 MB) and restarts the app. Your settings, queue and tools are kept.",
+                "Update Moflex Studio", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            await InstallUpdate();
+        }
+
+        async Task InstallUpdate()
+        {
+            string root = Path.GetDirectoryName(Application.ExecutablePath);
+            string ud = Path.Combine(appDir, "update"), zip = Path.Combine(ud, "Moflex.Studio.zip"), staged = Path.Combine(ud, "staged");
+            btnUpdate.Enabled = false;
+            try
+            {
+                if (Directory.Exists(ud)) Directory.Delete(ud, true);
+                Directory.CreateDirectory(ud);
+                pbTools.Visible = true; pbTools.Value = 0;
+                using (var wc = new WebClient())
+                {
+                    wc.Headers[HttpRequestHeader.UserAgent] = "MoflexStudio/" + AppVersion;
+                    wc.DownloadProgressChanged += (s, e) =>
+                    {
+                        pbTools.Value = Math.Max(0, Math.Min(100, e.ProgressPercentage));
+                        SetStatus(string.Format("Downloading Moflex Studio {0}... {1:0.0} / {2:0.0} MB", updateVer, e.BytesReceived / 1048576.0, e.TotalBytesToReceive / 1048576.0));
+                    };
+                    await wc.DownloadFileTaskAsync(new Uri(UpdateBase + "Moflex.Studio.zip?v=" + Uri.EscapeDataString(updateVer)), zip);
+                }
+                SetStatus("Checking the download...");
+                string got = await Task.Run(() =>
+                {
+                    using (var md5 = MD5.Create()) using (var fs = File.OpenRead(zip))
+                        return BitConverter.ToString(md5.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+                });
+                if (got != updateMd5) throw new Exception("the download was damaged (checksum mismatch); try again");
+                SetStatus("Unpacking...");
+                await Task.Run(() => ZipFile.ExtractToDirectory(zip, staged));
+                string top = Path.Combine(staged, "Moflex Studio");
+                if (!File.Exists(Path.Combine(top, "Moflex Studio.exe"))) throw new Exception("the update has no Moflex Studio.exe in it");
+                File.Delete(zip);
+                // the running exe can't overwrite itself: a script waits for this process to end, copies the
+                // new files over the install (settings, queue, python and ffmpeg aren't in the bundle, so they stay),
+                // starts the new version and removes the staging folder
+                string cmd = Path.Combine(ud, "update.cmd");
+                File.WriteAllText(cmd, string.Join("\r\n", new[] {
+                    "@echo off",
+                    ":wait",
+                    "tasklist /FI \"PID eq " + Process.GetCurrentProcess().Id + "\" 2>nul | find \"" + Process.GetCurrentProcess().Id + "\" >nul && (timeout /t 1 /nobreak >nul & goto wait)",
+                    "robocopy \"" + top + "\" \"" + root + "\" /E /R:5 /W:1 /NFL /NDL /NJH /NJS /NP >nul",
+                    "start \"\" \"" + Path.Combine(root, "Moflex Studio.exe") + "\"",
+                    "cd /d \"" + root + "\"",
+                    "rd /s /q \"" + ud + "\"" }) + "\r\n", Encoding.ASCII);
+                Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + cmd + "\"") { CreateNoWindow = true, UseShellExecute = false, WorkingDirectory = root });
+                SetStatus("Restarting into Moflex Studio " + updateVer + "...");
+                SaveQueue();
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Update failed: " + ex.Message);
+                try { if (Directory.Exists(ud)) Directory.Delete(ud, true); } catch { }
+            }
+            finally { btnUpdate.Enabled = true; pbTools.Visible = false; }
         }
 
         async Task Fetch(string url, string what, string destDir, string[] only)
@@ -1166,9 +1281,12 @@ namespace MoflexStudio
             RenumberAud();
             await audio2.FromJson(null);
             lvVer.Items.Clear();
-            foreach (var x in J.A(J.G(job, "versions"))) { var d = J.D(x); if (d != null) AddVerRow(J.Clone(d)); }
-            RenumberList(lvVer);
-            txtMainLabel.Text = J.S(J.G(job, "main_label")); txtVerLabel.Text = ""; cmbVerLayout.SelectedIndex = 0;
+            var vrows = J.A(J.G(job, "versions")).Select(vx => J.D(vx)).Where(vx => vx != null).Select(vx => J.Clone(vx)).ToList();
+            if (!vrows.Any(vx => J.B(J.G(vx, "self"))))                    // this file's own video: row 1 unless moved
+                vrows.Insert(0, new Dict { { "self", true }, { "label", J.S(J.G(job, "main_label")) } });
+            foreach (var vd in vrows) AddVerRow(vd);
+            RenumberVer();
+            txtVerLabel.Text = ""; cmbVerLayout.SelectedIndex = 0;
 
             // subtitles
             cmbSubFrom.Items.Clear();
@@ -1270,7 +1388,7 @@ namespace MoflexStudio
             var it = lv.SelectedItems[0]; int i = it.Index, j = i + dir;
             if (j < 0 || j >= lv.Items.Count) return;
             lv.Items.RemoveAt(i); lv.Items.Insert(j, it); it.Selected = true;
-            if (lv == lvAud) RenumberAud(); else RenumberList(lv);
+            if (lv == lvAud) RenumberAud(); else if (lv == lvVer) RenumberVer(); else RenumberList(lv);
         }
 
         // ---- extra audio tracks (2..8)
@@ -1332,9 +1450,19 @@ namespace MoflexStudio
             return Regex.IsMatch(l, "^[ -~]{1,7}$") ? l : null;   // the player's font: plain ASCII, 7 characters
         }
 
+        void RenumberVer()
+        {
+            for (int i = 0; i < lvVer.Items.Count; i++)
+            {
+                lvVer.Items[i].Text = i == 0 ? "1 main" : (i + 1).ToString();
+                lvVer.Items[i].Font = i == 0 ? new Font(lvVer.Font, FontStyle.Bold) : lvVer.Font;
+            }
+        }
+
         void AddVerRow(Dict d)
         {
-            string desc = J.Has(d, "desc") ? J.S(d["desc"]) : J.Has(d, "existing") && !J.Has(d, "source")
+            string desc = J.B(J.G(d, "self")) ? "This file's video" + (probe != null ? "  (" + Path.GetFileName(J.S(J.G(probe, "path"))) + ")" : "")
+                : J.Has(d, "desc") ? J.S(d["desc"]) : J.Has(d, "existing") && !J.Has(d, "source")
                 ? "Current version " + (J.I(d["existing"]) + 2) : Path.GetFileName(J.S(J.G(d, "source")));
             var lvi = new ListViewItem(new[] { "", J.S(J.G(d, "label")), desc }); lvi.Tag = d; lvVer.Items.Add(lvi);
         }
@@ -1342,7 +1470,7 @@ namespace MoflexStudio
         void AddVersionFromUi()
         {
             if (probe == null) { SetStatus("Open a source file first."); return; }
-            if (lvVer.Items.Count >= MaxVersions) { SetStatus("The player holds 4 versions: this one plus 3 more."); return; }
+            if (lvVer.Items.Count >= MaxVersions + 1) { SetStatus("The player holds 4 versions: the main one plus 3 more."); return; }
             string f;
             using (var d = new OpenFileDialog { Title = "Another version of the same film (video file or moflex)",
                 Filter = "Video|*" + string.Join(";*", VideoExt) + "|All files|*.*" })
@@ -1351,13 +1479,13 @@ namespace MoflexStudio
                 if (d.ShowDialog() != DialogResult.OK) return;
                 f = d.FileName;
             }
-            string l = VerLabelCheck(txtVerLabel.Text, "V" + (lvVer.Items.Count + 2));
+            string l = VerLabelCheck(txtVerLabel.Text, "V" + (lvVer.Items.Count + 1));
             if (l == null) { SetStatus("A version name is up to 7 plain characters (e.g. B&W, COLOR, IMAX)."); return; }
             bool mf = f.EndsWith(".moflex", StringComparison.OrdinalIgnoreCase);
             var lit = cmbVerLayout.SelectedItem as Item;
             var row = new Dict { { "source", f }, { "label", l }, { "source_type", lit == null ? "auto" : (string)lit.Tag },
                 { "desc", Path.GetFileName(f) + (mf ? "  (moflex: used as it is)" : "  (encoded like the main one)") } };
-            AddVerRow(row); RenumberList(lvVer);
+            AddVerRow(row); RenumberVer();
             txtVerLabel.Text = "";
         }
 
@@ -1673,7 +1801,7 @@ namespace MoflexStudio
             cmbLayout.Items.Clear(); cmbLayout.Enabled = false;
             numBitrate.Value = numDefBitrate.Value; numBitrate.Enabled = false;
             audio1.Setup(null); audio2.Setup(null);
-            lvAud.Items.Clear(); RenumberAud(); lvVer.Items.Clear(); txtVerLabel.Text = ""; txtMainLabel.Text = "";
+            lvAud.Items.Clear(); RenumberAud(); lvVer.Items.Clear(); txtVerLabel.Text = "";
             lvSubs.Items.Clear(); cmbSubFrom.Items.Clear(); txtSubLabel.Text = ""; numSubOffset.Value = 0; RenumberSubs();
             foreach (var t in new[] { txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc, txtQuery, txtOutName }) t.Text = "";
             cmbResults.Items.Clear(); cmbCategory.Text = "Movies"; cmbFormat.SelectedIndex = 0; cmbKind.SelectedIndex = 0; numS.Value = numE.Value = 0;
@@ -1707,12 +1835,13 @@ namespace MoflexStudio
             if (lvAud.Items.Count > MaxExtraAudio) { error = "At most 8 audio tracks (track 1 plus 7)."; tabs.SelectedIndex = 1; return null; }
             job["audio"] = new Dict { { "main", audio1.ToJson() ?? new Dict() },
                 { "extra", lvAud.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray() } };
-            if (lvVer.Items.Count > MaxVersions) { error = "At most 4 video versions (this one plus 3)."; tabs.SelectedIndex = 0; return null; }
-            job["versions"] = lvVer.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray();
-            string ml = VerLabelCheck(txtMainLabel.Text, "-");
-            if (ml == null) { error = "The main version's name is up to 7 plain characters."; tabs.SelectedIndex = 0; return null; }
-            job["main_label"] = txtMainLabel.Text.Trim();
-            if (!chkSuper.Checked && (lvAud.Items.Count > 0 || lvVer.Items.Count > 0))
+            if (lvVer.Items.Count > MaxVersions + 1) { error = "At most 4 video versions (the main one plus 3)."; tabs.SelectedIndex = 0; return null; }
+            var vrowsOut = lvVer.Items.Cast<ListViewItem>().Select(i => J.Clone((Dict)i.Tag)).ToList();
+            foreach (var vd in vrowsOut) vd.Remove("desc");
+            job["main_label"] = vrowsOut.Count > 0 ? J.S(J.G(vrowsOut[0], "label")) : "";
+            // just this file's video = no versions; otherwise the list in order, row 1 the main one
+            job["versions"] = vrowsOut.Count <= 1 ? new object[0] : vrowsOut.Select(vd2 => (object)vd2).ToArray();
+            if (!chkSuper.Checked && (lvAud.Items.Count > 0 || lvVer.Items.Count > 1))
             { error = "Extra audio tracks and video versions live in the SUPER MOFLEX trailer: tick SUPER MOFLEX on the Output tab, or remove them."; tabs.SelectedIndex = 4; return null; }
             if (lvSubs.Items.Count > 16) { error = "At most 16 subtitle tracks."; tabs.SelectedIndex = 2; return null; }
             job["subtitles"] = lvSubs.Items.Cast<ListViewItem>().Select(i => (object)J.Clone((Dict)i.Tag)).ToArray();

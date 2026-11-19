@@ -1,6 +1,6 @@
 # Moflex Studio
 
-An all-in-one **SUPER MOFLEX** builder for Windows. Give it a video file, a moflex or a SUPER MOFLEX. It produces a 3DS-ready moflex with track 1 audio, an optional track 2, up to 16 subtitle tracks, metadata and a poster.
+An all-in-one **SUPER MOFLEX** builder for Windows. Give it a video file, a moflex or a SUPER MOFLEX. It produces a 3DS-ready moflex with track 1 audio, up to 7 more audio tracks, up to 3 other versions of the video (e.g. colour and black-and-white), up to 16 subtitle tracks, metadata and a poster. It updates itself from **Settings → Check for updates**.
 
 Special thanks to lenn3 for discovering that raw AVI without audio prevents the moflex encoder hang at 99%, now things are super fast
 
@@ -12,6 +12,7 @@ Special thanks to lenn3 for discovering that raw AVI without audio prevents the 
 ## Contents
 
 - [Install](#install)
+- [Updating](#updating)
 - [Quick start](#quick-start)
 - [What each tab does](#what-each-tab-does)
 - [The queue](#the-queue)
@@ -22,6 +23,7 @@ Special thanks to lenn3 for discovering that raw AVI without audio prevents the 
 - [How it works](#how-it-works)
 - [Folder layout](#folder-layout)
 - [Building the exe](#building-the-exe)
+- [Releasing an update](#releasing-an-update)
 
 ---
 
@@ -44,16 +46,28 @@ To remove it, delete the folder.
 
 ---
 
+## Updating
+
+- At every start the app checks for a newer version. When there is one, the status bar says so.
+- **Settings → Check for updates** (the button then reads **Update to 1.x**) downloads the new version, checks it, and restarts the app into it. It takes a few seconds.
+- Your **settings, queue, Python and ffmpeg are kept**: the update only replaces the app's own files.
+- It won't update while the queue is running. Finish or stop the queue first.
+- **Coming from 1.2 or older** (no update button yet): download `Moflex.Studio.zip` from the [Releases page](../../releases) once and unzip it over the old folder. Close the app first. After that, updates come through the button.
+
+---
+
 ## Quick start
 
 **Fresh video → SUPER MOFLEX**
 
-1. **Open...** a video file, or drag it onto the window. It reads the file and fills in sensible defaults: layout detected, English audio as track 1, another language as track 2, text subtitles, and the title and year from the file name.
+1. **Open...** a video file, or drag it onto the window. It reads the file and fills in sensible defaults: layout detected, English audio as track 1, every other audio stream as tracks 2, 3 and on, text subtitles, the title and year from the file name, and the minutes from its length.
 2. Check the tabs (described below). Usually you only touch **Info + poster** (search TMDB, pick the result).
 3. Click **Add to queue**. The editor clears so you can set up the next file.
 4. Click **Start queue**.
 
-**Edit an existing moflex or SUPER MOFLEX** (add a track 2, add or relabel subtitles, change the poster or info, fix quiet audio): open it the same way. The video is never re-encoded, so this takes seconds.
+**Edit an existing moflex or SUPER MOFLEX** (add, remove, reorder or relabel audio tracks and subtitles, add or rename video versions or choose which one is the main version, change the poster or info, fix quiet audio): open it the same way. The video is never re-encoded, so this takes seconds.
+
+**A whole TV season:** set up and queue the first episode (search TMDB as **TV episode** and pick the show). Then drag the rest of the season onto the window: each episode gets the show's info and poster and its own episode title. See *Next episodes* under [Info + poster](#info--poster).
 
 **Batch:** drag **several files or a whole folder** onto the window, or onto the `.exe` icon. Each one is queued with the current Video/Output settings and the defaults above.
 
@@ -79,11 +93,13 @@ Shows what was detected:
 
 The picture is always **letterboxed, never stretched**, so the aspect ratio is kept. Sources above 30 fps are halved (60 → 30).
 
-**Other versions of the film** (up to 3 besides the main one, e.g. a colour and a black-and-white master):
-- **Add file...** a video file (it's encoded exactly like the main one: same 2D/3D output and bitrate) or a moflex (used as it is; it must be the same size and 2D/3D mode).
-- Give each a **Name** of up to 7 characters (`B&W`, `COLOR`, `IMAX`), and name the main one too. That's what the player's **VIDEO > Version** row shows.
+**Versions of the film** (up to 4 in all, e.g. a colour and a black-and-white master):
+- The list starts with **this file's video**. **Row 1 is the main version** (marked *main*): the file's normal video, what every player shows, including the official viewer. The other rows are for the CLOWNSEC player, which switches between them with **VIDEO > Version**.
+- **Add file...** a video file (it's encoded exactly like the main one: same 2D/3D output and bitrate) or a moflex (used as it is; it must be the same size and 2D/3D mode). **Layout** is that file's own picture layout, like *Source layout* above.
+- **Name** each one, this file's video too, in up to 7 characters (`B&W`, `COLOR`, `IMAX`): select a row, type it and click **Update selected**. That's what the player's Version row shows.
+- **Up / Down** reorder the list. Move a version to row 1 to make it the main one. On a SUPER MOFLEX that only swaps the videos around, without re-encoding. **Remove** drops a version (this file's own video can't be removed).
 - All versions must share one timeline: the player switches at the same moment. Each carries the same track 1 audio, so every audio track works with every version.
-- Each version adds roughly the main video's size again. Only the CLOWNSEC player sees them; the official viewer plays the main one.
+- Each version adds roughly the main video's size again.
 
 ### Audio
 
@@ -161,6 +177,7 @@ If you set a poster, a `.jpg` copy of it is saved next to the moflex.
 - **Bitrate / Output folder:** defaults for new jobs.
 - **Remember the last output folder:** when ticked (the default), new jobs start in the folder you last used, even after closing and reopening the app. Untick it to always start at the *Output folder* above.
 - **Tools:** shows whether Python, ffmpeg, RunAsDate and the license were found. **Download missing tools** fetches Python and ffmpeg again.
+- **Check for updates** / **Update to 1.x** and the version you're running: see [Updating](#updating).
 
 ---
 
@@ -191,7 +208,7 @@ For a video file:
 | **2/3 Encoding** |  2 passes | estimate (the encoder reports nothing until it's done) |
 | **3/3 Building** | Audio normalize and convert, subtitles, poster, info, trailer | per step |
 
-A moflex input only goes through **Building**.
+Each other version made from a video file adds its own **AVI** and **Encoding** stages before Building, so a film with a B&W version shows 1/5 to 5/5. A moflex input only goes through **Building** (plus those stages if you add a version from a video file).
 
 During the encode, the moflex encoder starts hidden in the system tray. Click its tray icon to watch it if you like. Don't close it, because that ends the encode.
 
@@ -208,7 +225,7 @@ Measured on the server (32 threads), for a 76-minute 1080p HEVC full-SBS movie w
 | Building (two 76-min tracks normalized and converted, poster, info) | ~7 min |
 | **Total** | **~17 min** |
 
-Editing an existing moflex takes a few seconds. Converting a new track 2 takes about a minute per hour of audio.
+Editing an existing moflex takes a few seconds. Each new audio track takes about a minute per hour of audio. Each other version made from a video file costs about as long again as the main AVI and encode.
 
 ---
 
@@ -217,6 +234,7 @@ Editing an existing moflex takes a few seconds. Converting a new track 2 takes a
 - **The finished moflex:** the Output folder, or next to the source. It's written under a temporary name and renamed only when complete, so a half-written file never shows up there.
 - **Temporary work:** `%TEMP%\moflex_studio_*`, holding the lossless AVI (several GB for a movie). It's deleted when the job finishes or is stopped, or at the next app start after a crash.
 - **Settings:** `app\settings.json`. **Queue:** `app\queue.json`. **Errors:** `app\error.log`.
+- **Updates:** downloaded into `app\update\`, which is removed once the new version is in place.
 
 ---
 
@@ -232,6 +250,9 @@ Editing an existing moflex takes a few seconds. Converting a new track 2 takes a
 | Search TMDB says "no TMDB token set" | Paste your token in **Settings** and click **Save settings**. |
 | Something odd happened | Check `app\error.log`. The app logs unexpected errors there instead of closing, and the log box under the queue shows the details of each job. |
 | SmartScreen blocks the exe | **More info → Run anyway**. Or right-click the zip → Properties → **Unblock** before unzipping. |
+| "The output would be about N GB, over the 4 GB..." | A 3DS SD card is FAT32 and can't hold a 4 GB file. Lower the bitrate, or drop audio tracks or video versions. |
+| "video version N is WxH but the main one is ..." | Every version must be encoded the same way. Use a video file (Studio encodes it to match) or a moflex made with the same 2D/3D output. |
+| "Update failed: ..." | Check the internet connection and try **Settings → Check for updates** again. A damaged download is detected and never installed. |
 
 ---
 
@@ -264,14 +285,17 @@ The job format is documented at the top of `app\moflex_studio.py`.
    3. The AVI has no audio on purpose. With audio in it, Moflex encoders final write runs single-threaded and takes about 45 minutes for a movie; without audio it takes minutes. The audio is added in the next step. (thanks for lenn3 for this discovery)
 2. **Assemble** (every input):
    1. Track 1 is normalized and converted to 3DS ADPCM, then written into the moflex in-band.
-   2. A new **CSXTRA trailer** is written:
+   2. The version in row 1 becomes the file's own video. Every other version is given the same track 1.
+   3. A new **CSXTRA trailer** is written:
       - `NFO0` metadata
       - `ART5` poster
       - `LNG0` track 1 language
       - `SUB1` subtitles (up to 16)
-      - `AUD1` track 2
-   3. Sections the file already had are copied byte for byte unless you changed them.
-   4. The result is checked before it's moved into place.
+      - `AUD1` audio tracks 2 to 8, one section each, in order
+      - `VID1` the other video versions, each a whole moflex with its name
+      - `VLB0` the main version's name
+   4. Sections the file already had are copied byte for byte unless you changed them. Big ones (audio, video) are streamed, never loaded into memory.
+   5. The result is checked before it's moved into place.
 
 ---
 
@@ -288,10 +312,26 @@ app\User_CTR.lic         the encoder license
 app\python\  app\bin\    downloaded on first run (not in git)
 app\settings.json        your settings + TMDB token (not in git)
 app\queue.json           the saved queue (not in git)
+app\update\              only while an update is being installed
 src\                     MoflexStudio.cs, build.bat, icon.ico
 docs\                    screenshots for this README
+release.sh               publishes a new version (see below)
 ```
 
 ## Building the exe
 
 On Windows, run `src\build.bat`. It uses the `csc.exe` that ships with Windows (.NET Framework 4.x, C# 5), so there's nothing to install, and it writes `Moflex Studio.exe` next to `app\`.
+
+## Releasing an update
+
+The app checks `https://www.clownsec.com/studio/latest.txt` (two lines: the version, then the MD5 of the zip) and downloads `Moflex.Studio.zip` beside it. That folder isn't linked from anywhere; only the app knows it.
+
+1. Raise `AppVersion` near the top of `src\MoflexStudio.cs` (e.g. `"1.4"`).
+2. Build the exe (`src\build.bat`) and commit everything, the new `Moflex Studio.exe` included.
+3. `./release.sh 1.4 notes.md`
+   - Checks that the tag matches `AppVersion` and that the working tree is clean.
+   - Makes `Moflex.Studio.zip` from the commit (`git archive`, the same layout as every release).
+   - Uploads the zip to the server first and `latest.txt` last, so nobody is offered a version whose zip isn't there yet, then checks both downloads.
+   - Creates GitHub release `v1.4` with the zip and your notes.
+
+Running apps see the new version at their next start, or straight away with **Check for updates**.
