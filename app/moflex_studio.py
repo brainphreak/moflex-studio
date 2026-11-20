@@ -235,6 +235,8 @@ def read_trailer(path):
             return t
         off = struct.unpack('<Q', ft[:8])[0]
         end = size - 16
+        if off > end:                                # a footer pointing past the file: damaged, or a cut copy
+            raise RuntimeError('the SUPER MOFLEX trailer is damaged (it points past the end of the file)')
         t['base'] = off
         q = off
         while q + 8 <= end:
@@ -397,6 +399,7 @@ def probe(path):
         if is3d is None:
             low = os.path.basename(path).lower()
             is3d = '1' if ('(3d)' in low or 'sbs' in low or 'lrf' in low or '_3d' in low) else '0'
+        info['meta_from_file'] = nfo_meta(nfo, path)
         info['moflex'] = {'is3d': is3d == '1', 'nfo': nfo, 'lang_main': t['lang_main'],
                           'audio2': t['audio2'], 'audios': t['audios'], 'videos': t['videos'],
                           'vid_main': t['vid_main'], 'vaud': t['vaud'], 'subs': t['subs'], 'art': t['art']}
@@ -450,8 +453,11 @@ def tmdb_details(kind, tid, se=None):
                 'showdesc': d.get('overview', ''), 'desc': d.get('overview', ''), 'eptitle': '',
                 'season_episode': se,
                 'poster_url': f"https://image.tmdb.org/t/p/w500{d['poster_path']}" if d.get('poster_path') else ''}
-        if se:
-            e = tmdb(f'tv/{tid}/season/{se[0]}/episode/{se[1]}')
+        if se and se[1] > 0:                     # TMDB has season 0 (specials) but no episode 0
+            try:
+                e = tmdb(f'tv/{tid}/season/{se[0]}/episode/{se[1]}')
+            except Exception:
+                e = {}                               # not on TMDB: keep the show's info
             info['eptitle'] = e.get('name', '')
             info['date'] = e.get('air_date', '') or ''
             if e.get('runtime'):
@@ -724,7 +730,55 @@ def nfo_section(md, is3d):
              f"format={(md.get('format') or 'converted').lower()}", f"desc={f(str(md.get('desc') or ''))}"]
     if md.get('showdesc'):
         lines.append(f"showdesc={f(str(md['showdesc']))}")
+    # what the video IS, kept in the file so nothing has to guess it from the file name:
+    # kind = movie | episode | short | musicvideo; for an episode, title= stays the SHOW's name and
+    # season/episode/eptitle say which one (season 0 = the show's specials, episode 0 = a season's special)
+    kind = md_kind(md)
+    lines.append(f"kind={kind}")
+    se = md.get('season_episode')
+    if kind == 'episode' and se and len(se) == 2:
+        lines.append(f"season={int(se[0])}")
+        lines.append(f"episode={int(se[1])}")
+        if md.get('eptitle'):
+            lines.append(f"eptitle={f(str(md['eptitle']))}")
+    if md.get('tmdb_id'):
+        lines.append(f"tmdb={md['tmdb_id']}")
     return section(b'NFO0', ('\n'.join(lines) + '\n').encode('utf-8'))
+
+KINDS = ('movie', 'episode', 'short', 'musicvideo')
+KIND_SHELF = {'movie': 'Movies', 'episode': 'TV Shows', 'short': 'Shorts', 'musicvideo': 'Music Videos'}
+
+def md_kind(md):
+    """the kind of video a job's metadata describes: its own 'kind', else an episode when it has a
+    season/episode, else what the shelf implies (Shorts, Music Videos), else a movie"""
+    k = str(md.get('kind') or '').lower()
+    if k in KINDS:
+        return k
+    se = md.get('season_episode')
+    if se and len(se) == 2:
+        return 'episode'
+    cat = str(md.get('category') or '').lower()
+    return 'short' if cat == 'shorts' else 'musicvideo' if cat == 'music videos' else 'movie'
+
+def nfo_meta(nfo, path):
+    """embedded info -> the season/episode/eptitle/kind a job uses: the file's own fields first,
+    the file name only for what the file does not say (files made before these fields existed)"""
+    _, _, se = parse_name(path)
+    out = {}
+    try:
+        if nfo.get('season', '') != '' and nfo.get('episode', '') != '':
+            se = [int(nfo['season']), int(nfo['episode'])]
+    except ValueError:
+        pass
+    out['season_episode'] = se
+    ep = nfo.get('eptitle', '')
+    if not ep and se:
+        m = re.search(r'S\d+e\d+ - (.+)$', os.path.splitext(os.path.basename(path))[0], re.I)
+        ep = m.group(1) if m else ''
+    out['eptitle'] = ep
+    out['kind'] = md_kind({'kind': nfo.get('kind'), 'season_episode': se, 'category': nfo.get('category')})
+    out['tmdb_id'] = nfo.get('tmdb', '')
+    return out
 
 FAT32_MAX = 4 * 1024 ** 3 - 1          # the 3DS SD card is FAT32: no file can reach 4 GiB
 ADPCM_BPS = 44100 / 1024 * (8 + 1024)   # bytes/s of one 44.1 kHz stereo IMA-ADPCM track (4-byte state per channel + 1024 samples)
@@ -820,7 +874,10 @@ def blocks_only(src, dst):
     with open(src, 'rb') as fi, open(dst, 'wb') as fo:
         left = t['base']
         while left > 0:
-            b = fi.read(min(left, 8 << 20)); fo.write(b); left -= len(b)
+            b = fi.read(min(left, 8 << 20))
+            if not b:
+                raise RuntimeError('the moflex ended early (truncated file?)')
+            fo.write(b); left -= len(b)
     return dst
 
 def track1_wav(base, work):

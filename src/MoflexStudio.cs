@@ -459,7 +459,7 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "1.6";
+        const string AppVersion = "1.7";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
@@ -487,6 +487,11 @@ namespace MoflexStudio
         ListView lvAud; Label lblAudCount;
         ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout, cmbVerAudio;
         ListView lvSubs; ComboBox cmbSubFrom; TextBox txtSubLabel; NumericUpDown numSubOffset; Label lblSubCount;
+        // Type (what the video IS, saved as kind=) and the shelf it sits on (category=) are separate:
+        // the shelf follows the type unless it is set to something of its own
+        static readonly string[] KindNames = { "movie", "episode", "short", "musicvideo" };
+        static readonly string[] KindShelf = { "Movies", "TV Shows", "Shorts", "Music Videos" };
+        bool fillingEditor;
         ComboBox cmbKind, cmbResults, cmbCategory, cmbFormat; TextBox txtQuery, txtTitle, txtEpTitle, txtGenres, txtYear, txtRuntime, txtDate, txtDesc;
         NumericUpDown numS, numE; PictureBox picArt; Label lblArt; Button btnArtKeep;
         TextBox txtOutDir, txtOutName; Label lblAutoName; CheckBox chkSuper, chkOverwrite;
@@ -686,7 +691,7 @@ namespace MoflexStudio
 
             // ---- Info + poster
             cmbKind = Add(tInfo, new ComboBox { Left = 8, Top = 8, Width = 92, DropDownStyle = ComboBoxStyle.DropDownList });
-            cmbKind.Items.AddRange(new object[] { "Movie", "TV episode" }); cmbKind.SelectedIndex = 0;
+            cmbKind.Items.AddRange(new object[] { "Movie", "TV episode", "Short", "Music video" }); cmbKind.SelectedIndex = 0;
             txtQuery = Add(tInfo, new TextBox { Left = 104, Top = 8, Width = 236 });
             L(tInfo, "S", 346, 8, 14);
             numS = Add(tInfo, new NumericUpDown { Left = 362, Top = 8, Width = 44, Minimum = 0, Maximum = 99 });
@@ -703,7 +708,7 @@ namespace MoflexStudio
             L(tInfo, "Date", 236, ly + 84, 34); txtDate = Add(tInfo, new TextBox { Left = 272, Top = ly + 84, Width = 162 });
             L(tInfo, "Category", 8, ly + 112, 62);
             cmbCategory = Add(tInfo, new ComboBox { Left = 72, Top = ly + 112, Width = 150 });
-            cmbCategory.Items.AddRange(new object[] { "Movies", "TV Shows", "Music Videos", "Concerts", "Shorts" });
+            cmbCategory.Items.AddRange(new object[] { "Movies", "TV Shows", "Shorts", "Music Videos", "Anime", "Concerts", "Uncategorized" });
             L(tInfo, "Format", 236, ly + 112, 46);
             cmbFormat = Add(tInfo, new ComboBox { Left = 284, Top = ly + 112, Width = 150, DropDownStyle = ComboBoxStyle.DropDownList });
             cmbFormat.Items.AddRange(new object[] { "converted", "native" }); cmbFormat.SelectedIndex = 0;
@@ -722,7 +727,14 @@ namespace MoflexStudio
             bSearch.Click += async delegate { await TmdbSearch(); };
             txtQuery.KeyDown += async (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await TmdbSearch(); } };
             cmbResults.SelectedIndexChanged += async delegate { await TmdbPick(); };
-            cmbKind.SelectedIndexChanged += delegate { bool tv = cmbKind.SelectedIndex == 1; numS.Enabled = numE.Enabled = txtEpTitle.Enabled = tv; UpdateAutoName(); };
+            cmbKind.SelectedIndexChanged += delegate
+            {
+                bool tv = cmbKind.SelectedIndex == 1; numS.Enabled = numE.Enabled = txtEpTitle.Enabled = tv;
+                // the shelf follows the type, unless it has been pointed at a shelf of its own (Anime...)
+                if (!fillingEditor && (cmbCategory.Text.Trim() == "" || KindShelf.Contains(cmbCategory.Text.Trim())))
+                    cmbCategory.Text = KindShelf[Math.Max(0, cmbKind.SelectedIndex)];
+                UpdateAutoName();
+            };
             bImg.Click += delegate
             {
                 using (var d = new OpenFileDialog { Title = "Poster image", Filter = "Images|*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.gif|All files|*.*" })
@@ -1220,6 +1232,7 @@ namespace MoflexStudio
                 var se = J.A(J.G(parsed, "season_episode"));
                 md["season_episode"] = se.Length == 2 ? new object[] { J.I(se[0]), J.I(se[1]) } : null;
                 md["category"] = se.Length == 2 ? "TV Shows" : "Movies";
+                md["kind"] = se.Length == 2 ? "episode" : "movie";
                 md["format"] = "converted";
                 md["runtime"] = Minutes(pr);
                 job["metadata"] = md;
@@ -1248,10 +1261,14 @@ namespace MoflexStudio
                     var md = new Dict();
                     foreach (var k in new[] { "title", "genres", "date", "desc", "showdesc", "category", "format" }) md[k] = J.S(J.G(nfo, k));
                     md["year"] = J.I(J.G(nfo, "year")); md["runtime"] = J.I(J.G(nfo, "runtime")) > 0 ? J.I(J.G(nfo, "runtime")) : Minutes(pr);
-                    var se = J.A(J.G(parsed, "season_episode"));
+                    // season / episode / episode title / type: the file's own fields, the file name only for
+                    // files made before those were stored (the backend does the fallback)
+                    var mff = J.G(pr, "meta_from_file");
+                    var se = J.A(J.G(mff, "season_episode"));
                     md["season_episode"] = se.Length == 2 ? new object[] { J.I(se[0]), J.I(se[1]) } : null;
-                    var m = Regex.Match(Path.GetFileNameWithoutExtension(src), @"S\d+e\d+ - (.+)$", RegexOptions.IgnoreCase);
-                    md["eptitle"] = m.Success ? m.Groups[1].Value : "";
+                    md["eptitle"] = J.S(J.G(mff, "eptitle"));
+                    md["kind"] = J.S(J.G(mff, "kind"));
+                    if (J.S(J.G(mff, "tmdb_id")) != "") md["tmdb_id"] = J.S(J.G(mff, "tmdb_id"));
                     md["_from_file"] = true;
                     job["metadata"] = md;
                 }
@@ -1407,7 +1424,15 @@ namespace MoflexStudio
             cmbCategory.Text = J.S(J.G(md, "category")) == "" ? "Movies" : J.S(J.G(md, "category"));
             cmbFormat.SelectedIndex = J.S(J.G(md, "format")) == "native" ? 1 : 0;
             var se = J.A(J.G(md, "season_episode"));
-            cmbKind.SelectedIndex = se.Length == 2 ? 1 : 0;
+            int ki = Array.IndexOf(KindNames, J.S(J.G(md, "kind")));
+            if (ki < 0)                                             // a file from before kind= was stored
+            {
+                int ci = Array.IndexOf(KindShelf, cmbCategory.Text);
+                ki = se.Length == 2 ? 1 : (ci == 2 || ci == 3) ? ci : 0;
+            }
+            fillingEditor = true;                                   // the file's own shelf stays as it is
+            cmbKind.SelectedIndex = ki;
+            fillingEditor = false;
             numS.Value = se.Length == 2 ? Math.Min(99, J.I(se[0])) : 0; numE.Value = se.Length == 2 ? Math.Min(999, J.I(se[1])) : 0;
             txtQuery.Text = txtTitle.Text != "" ? txtTitle.Text : J.S(J.G(J.G(pr, "parsed"), "title"));
             cmbResults.Items.Clear();
@@ -1850,7 +1875,7 @@ namespace MoflexStudio
             int e = se.Length == 2 ? J.I(se[1]) : J.I(J.G(showCarry, "episode")) + 1;
             foreach (var k in new[] { "title", "genres", "category", "format", "showdesc", "tmdb_id" }) md[k] = J.S(J.G(showCarry, k));
             md["year"] = J.I(J.G(showCarry, "year"));
-            md["season_episode"] = new object[] { s, e };
+            md["season_episode"] = new object[] { s, e }; md["kind"] = "episode";
             md["eptitle"] = ""; md["date"] = ""; md["desc"] = J.S(J.G(showCarry, "showdesc"));
             if (J.Has(showCarry, "art")) job["art"] = showCarry["art"];
             showCarry["season"] = s; showCarry["episode"] = e;               // so a file without S/E in its name counts on
@@ -1899,7 +1924,7 @@ namespace MoflexStudio
             var it = cmbResults.SelectedItem as Item; if (it == null) return;
             bool tv = cmbKind.SelectedIndex == 1;
             var args = new List<string> { "tmdb-details", tv ? "tv" : "movie", J.S(J.G(it.Tag, "id")) };
-            if (tv && numS.Value > 0 && numE.Value > 0) args.Add(numS.Value + ":" + numE.Value);
+            if (tv && numE.Value > 0) args.Add(numS.Value + ":" + numE.Value);   // TMDB has season 0 (specials), no episode 0
             SetStatus("Getting TMDB details...");
             try
             {
@@ -1914,7 +1939,8 @@ namespace MoflexStudio
                 txtDesc.Text = J.S(J.G(d, "desc"));
                 txtEpTitle.Text = J.S(J.G(d, "eptitle"));
                 origShowDesc = J.S(J.G(d, "showdesc"));
-                cmbCategory.Text = J.S(J.G(d, "category"));
+                if (cmbCategory.Text.Trim() == "" || KindShelf.Contains(cmbCategory.Text.Trim()))
+                    cmbCategory.Text = J.S(J.G(d, "category"));          // a shelf of its own (Anime...) stays
                 string pu = J.S(J.G(d, "poster_url"));
                 if (pu != "" && currentArtMode == "none") SetArt("url", pu);
                 else if (pu != "") { artUrl = pu; lblArt.Text = "TMDB poster available: press None, then pick the result again to use it."; }
@@ -1977,7 +2003,7 @@ namespace MoflexStudio
             if (txtTitle.Text.Trim() != "" && chkSuper.Checked)
             {
                 string t = txtTitle.Text.Trim(), y = txtYear.Text.Trim() == "" ? "0" : txtYear.Text.Trim(), tag = is3d ? " (3D)" : "";
-                if (cmbKind.SelectedIndex == 1 && numS.Value > 0 && numE.Value > 0)
+                if (cmbKind.SelectedIndex == 1 && (numS.Value > 0 || numE.Value > 0))
                 {
                     string p = string.Format("{0} ({1}){2} (S) - S{3:00}e{4:00}", t, y, tag, (int)numS.Value, (int)numE.Value);
                     string ep = txtEpTitle.Text.Trim();
@@ -2059,7 +2085,9 @@ namespace MoflexStudio
                     { "genres", txtGenres.Text.Trim() }, { "runtime", rt }, { "date", txtDate.Text.Trim() },
                     { "desc", txtDesc.Text.Replace("\r\n", " ").Replace("\n", " ").Trim() }, { "showdesc", origShowDesc },
                     { "eptitle", tv ? txtEpTitle.Text.Trim() : "" }, { "format", cmbFormat.Text },
-                    { "season_episode", tv && numS.Value > 0 && numE.Value > 0 ? new object[] { (int)numS.Value, (int)numE.Value } : null } };
+                    // season 0 = the show's specials, episode 0 = a season's special: only S00E00 says nothing
+                    { "season_episode", tv && (numS.Value > 0 || numE.Value > 0) ? new object[] { (int)numS.Value, (int)numE.Value } : null },
+                    { "kind", KindNames[Math.Max(0, cmbKind.SelectedIndex)] } };
                 if (curTmdbId != "") md["tmdb_id"] = curTmdbId;
                 job["metadata"] = md;
             }

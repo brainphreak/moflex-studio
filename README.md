@@ -148,7 +148,10 @@ The picture is always **letterboxed, never stretched**, so the aspect ratio is k
   3. The file name always uses the two-digit form: `S01e05`, never `S1e5`, so episodes sort in the right order everywhere.
 - **Next episodes:** after you queue a TV episode, a box appears at the bottom of this tab: *Next episodes: use the info and poster of ...*. While it's ticked, every episode you open or drop next gets the same show title, year, genres, category, format and poster. Season and episode come from each file's name, or count up from the last one. If you picked the show from TMDB, each episode's title and description are fetched automatically. That makes a whole season one drag and drop. Untick it to stop. A movie file is never touched by it.
 - **Minutes** is filled in from the length of the file. TMDB's number is only used when the length can't be read.
-- **Category / Format:** where the CLOWNSEC catalog files it. Format is `converted` for 2D→3D conversions and `native` for real 3D.
+- **Type** (Movie, TV episode, Short, Music video) is what the video *is*. **Category** is the shelf it sits on in the CLOWNSEC player. The shelf follows the type (TV episode → TV Shows) unless you pick one of its own, such as **Anime** or **Concerts**; then it stays put. Both are saved in the file.
+- **Specials:** season **0** holds a show's specials (`S00e03`), and episode **0** is a season's special (`S04e00`). Both are saved and shown as episodes of the show.
+- **Everything is stored inside the file:** type, show title, season, episode and episode title along with the rest, so the CLOWNSEC player and Big Top know what a file is even after it's renamed. The file name is only a fallback, for files made before Studio 1.7: open one and add it to the queue to store its info (seconds, no re-encode).
+- **Format:** `converted` for 2D→3D conversions and `native` for real 3D.
 - **Poster:**
   - **Image...** uses your own picture. Use this for your "in 3D" artwork.
   - **None** removes it.
