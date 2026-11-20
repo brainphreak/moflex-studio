@@ -199,6 +199,8 @@ If you set a poster, a `.jpg` copy of it is saved next to the moflex.
 - **The queue is saved all the time** (`app\queue.json`). If the app, Windows or the power dies mid-job, reopen the app: the interrupted job is back to Pending and the finished ones stay done. Click Start to carry on.
 - **A crash never leaves anything running.** ffmpeg and the encoder are tied to the app and end with it. Leftover temporary files are deleted the next time the app starts.
 - **Status colors:** green is done, red is an error (hover for the reason), orange is stopped, interrupted or paused.
+- **Length check:** if the source's audio runs longer than its video (an interrupted 2D-to-3D conversion, for example), the extra audio is cut so it ends with the picture, and the job finishes as **Done - check log** with a warning saying how much was cut. A warning also appears when the video itself comes out more than 2 seconds shorter than the source says.
+- **The window can be resized, maximized and snapped** to half the screen. The editor keeps its size; the queue, its buttons and the log grow with the window.
 
 ### Progress stages
 

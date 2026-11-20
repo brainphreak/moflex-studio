@@ -118,6 +118,36 @@ def emit(_type, **kw):
 def log(text, stage=None):
     emit('log', stage=stage, text=text)
 
+def warn(job, text):
+    """something the user should look at: logged now, listed again when the job finishes"""
+    log('WARNING: ' + text, 'check')
+    job.setdefault('_warnings', []).append(text)
+
+def clock(sec):
+    sec = int(round(sec))
+    return f'{sec // 3600}:{sec // 60 % 60:02d}:{sec % 60:02d}' if sec >= 3600 else f'{sec // 60}:{sec % 60:02d}'
+
+def trim_wav(path, secs):
+    """cut a 16-bit WAV to `secs` (in place, streamed: an hour of PCM is ~600 MB). Returns the seconds cut."""
+    import wave
+    with wave.open(path, 'rb') as w:
+        par, n, rate = w.getparams(), w.getnframes(), w.getframerate()
+        keep = int(secs * rate)
+        if n <= keep:
+            return 0.0
+        tmp = path + '.trim'
+        with wave.open(tmp, 'wb') as o:
+            o.setparams(par)
+            left = keep
+            while left > 0:
+                b = w.readframes(min(1 << 20, left))
+                if not b:
+                    break
+                o.writeframes(b)
+                left -= len(b) // (par.sampwidth * par.nchannels)
+    os.replace(tmp, path)
+    return (n - keep) / rate
+
 class _LogWriter:
     """print() from the shared tools becomes 'log' events, so stdout stays one JSON object per line"""
     def __init__(self, stage): self.stage, self.buf = stage, ''
@@ -305,6 +335,18 @@ def is_moflex(path):
     with open(path, 'rb') as f:
         return f.read(2) == b'\x4c\x32'
 
+def stream_secs(s):
+    """a stream's own length in seconds (MP4/AVI: duration; MKV: the DURATION tag), or None"""
+    try:
+        if s.get('duration') not in (None, 'N/A'):
+            return float(s['duration'])
+    except ValueError:
+        pass
+    t = (s.get('tags') or {})
+    d = t.get('DURATION') or t.get('duration')
+    m = re.match(r'^(\d+):(\d\d):(\d\d(?:\.\d+)?)', d or '')
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
+
 def probe(path):
     r = run_quiet([FFPROBE, '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', path])
     if r.returncode != 0:
@@ -329,13 +371,15 @@ def probe(path):
         dar = w * sar / max(1, h)
         det = 'fsbs' if dar >= 2.5 else ('hsbs' if SBS_NAME.search(os.path.basename(path)) else '2d')
         info['video'] = {'index': v['index'], 'codec': v.get('codec_name'), 'width': w, 'height': h,
-                         'sar': sar, 'fps_num': fn, 'fps_den': fd, 'fps': fn / fd, 'detected': det}
+                         'sar': sar, 'fps_num': fn, 'fps_den': fd, 'fps': fn / fd, 'detected': det,
+                         'dur': stream_secs(v)}
     for s in st:
         t = s.get('tags', {})
         if s['codec_type'] == 'audio':
             info['audio'].append({'index': s['index'], 'codec': s.get('codec_name'),
                                   'channels': s.get('channels'), 'lang': t.get('language', 'und'),
-                                  'title': t.get('title', ''), 'default': bool(s.get('disposition', {}).get('default'))})
+                                  'title': t.get('title', ''), 'default': bool(s.get('disposition', {}).get('default')),
+                                  'dur': stream_secs(s)})
         elif s['codec_type'] == 'subtitle':
             info['subtitles'].append({'index': s['index'], 'codec': s.get('codec_name'),
                                       'lang': t.get('language', 'und'), 'title': t.get('title', ''),
@@ -456,6 +500,34 @@ def ffmpeg_progress(cmd, duration, stage):
     p.wait(); th.join(2)
     if p.returncode != 0:
         raise RuntimeError(f'{stage} failed: ' + ''.join(errs)[-600:].strip())
+
+def check_source_lengths(job, info):
+    """warn before encoding when the source's video stream is shorter than the audio going with it
+    (e.g. a 2D->3D conversion that stopped early: the original audio is all there, the picture isn't)"""
+    vd = (info.get('video') or {}).get('dur')
+    main = (job.get('audio') or {}).get('main') or {}
+    if not vd or 'stream' not in main or main.get('file'):
+        return
+    a = next((x for x in info['audio'] if x['index'] == int(main['stream'])), None)
+    ad = a and a.get('dur')
+    if ad and ad - vd > 2:
+        warn(job, f'the source\'s video ({clock(vd)}) is {clock(ad - vd)} shorter than its audio ({clock(ad)})'
+                  ' -- the picture may be cut short; the audio will be trimmed to match')
+        job['_short_warned'] = True
+
+def avi_secs(avi):
+    """the lossless AVI's video length (what the encoder will get), or None"""
+    r = run_quiet([FFPROBE, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                   'stream=duration,nb_frames,avg_frame_rate', '-of', 'json', avi])
+    try:
+        st = json.loads(r.stdout)['streams'][0]
+        d = stream_secs(st)
+        if d:
+            return d
+        n, (fn, fd) = int(st['nb_frames']), map(int, st['avg_frame_rate'].split('/'))
+        return n * fd / fn
+    except Exception:
+        return None
 
 def make_avi(job, info, layout, avi):
     """video only: with an audio stream the Mobiclip encoder's final write runs single-threaded at
@@ -582,11 +654,19 @@ def shift_sub(p, offset, work, n):
         return msm.shift_ass(p, os.path.join(work, f'sub{n}.shift.ass'), float(offset))
     return msm.shift_srt(p, os.path.join(work, f'sub{n}.shift.srt'), float(offset))
 
-def audio_wav(sel, default_file, work, tag):
+def audio_wav(sel, default_file, work, tag, job=None):
     msm, _, _ = tools()
     f = sel.get('file') or default_file
     p = os.path.join(work, f'audio.{tag}.wav')
-    return msm.extract_normalized(f, int(sel['stream']), p, tag, float(sel.get('offset') or 0))
+    p = msm.extract_normalized(f, int(sel['stream']), p, tag, float(sel.get('offset') or 0))
+    vd = (job or {}).get('_video_dur')
+    if vd:
+        # audio must not outlast the picture: the encoder writes the leftover as blocks with no
+        # sync markers, which players can't time (length 0:00, seeking broken in older players)
+        cut = trim_wav(p, vd)
+        if cut > 0.5:
+            warn(job, f'audio track "{tag}" ran {clock(cut)} past the end of the video -- trimmed to {clock(vd)}')
+    return p
 
 def load_wav(path):
     """16-bit PCM WAV -> (array('h'), channels, rate); read in chunks (a movie is ~400M samples)"""
@@ -784,13 +864,13 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
         wav = msm.extract_normalized(base, pr['audio'][0]['index'], os.path.join(work, 'audio.main.wav'), 'main')
     elif 'stream' in main:
         emit('progress', stage='super', pct=5, note='preparing audio track 1')
-        wav = audio_wav(main, default_audio_file, work, 'main')
+        wav = audio_wav(main, default_audio_file, work, 'main', job)
         lang_main = lang_main or 'eng'
     elif job.get('_video_only'):
         # freshly encoded from a silent source: every moflex gets an audio track, so add silence
         wav = os.path.join(work, 'audio.silent.wav')
         r = run_quiet([FFMPEG, '-y', '-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-                       '-t', f"{float(job.get('_duration') or 1):.3f}", '-c:a', 'pcm_s16le', wav])
+                       '-t', f"{float(job.get('_video_dur') or job.get('_duration') or 1):.3f}", '-c:a', 'pcm_s16le', wav])
         if r.returncode != 0:
             raise RuntimeError('could not make the silent audio track: ' + r.stderr.strip()[:300])
     if wav:
@@ -879,7 +959,7 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
             secs.append(s)
         else:
             emit('progress', stage='super', pct=82, note=f'preparing audio track {n + 2}')
-            w2 = audio_wav(it, default_audio_file, work, f'extra{n}')
+            w2 = audio_wav(it, default_audio_file, work, f'extra{n}', job)
             secs.append(adpcm_section(w2, it.get('label') or it.get('lang') or 'alt'))
             os.remove(w2)                               # an hour of PCM is ~600 MB: one at a time
 
@@ -1023,6 +1103,7 @@ def run_job(jobfile):
             if 'main' not in aud and info['audio']:
                 aud['main'] = {'stream': info['audio'][0]['index'], 'lang': (info['audio'][0]['lang'] or 'eng')[:3]}
             check_fat32(estimate_size(job, info), 'The output would be about')
+            check_source_lengths(job, info)
             n_alt = len(versions_to_encode(job))
             total = 3 + 2 * n_alt
             stages = ['avi', 'moflex'] + ['avi', 'moflex'] * n_alt + ['super']
@@ -1031,6 +1112,10 @@ def run_job(jobfile):
             emit('stage', stage='avi', index=1, total=total, text='Converting to lossless AVI')
             avi = os.path.join(work, 'moflex_job.avi')
             make_avi(job, info, layout, avi)
+            job['_video_dur'] = avi_secs(avi)
+            if job['_video_dur'] and info['duration'] - job['_video_dur'] > 2 and not job.get('_short_warned'):
+                warn(job, f"the converted video is {clock(job['_video_dur'])} but the source runs {clock(info['duration'])}"
+                          ' -- the picture may be cut short')
             emit('stage', stage='moflex', index=2, total=total,
                  text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
             enc = make_moflex(job, avi, work)
@@ -1072,7 +1157,8 @@ def run_job(jobfile):
         os.replace(tmp_final, final)
         if poster_full and os.path.exists(poster_full):
             shutil.copyfile(poster_full, os.path.splitext(final)[0] + '.jpg')
-        emit('done', output=final, size=os.path.getsize(final), seconds=round(time.time() - t0, 1))
+        emit('done', output=final, size=os.path.getsize(final), seconds=round(time.time() - t0, 1),
+             warnings=job.get('_warnings') or [])
     finally:
         if not job.get('keep_work'):
             shutil.rmtree(work, ignore_errors=True)

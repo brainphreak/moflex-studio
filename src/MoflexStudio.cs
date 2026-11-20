@@ -459,7 +459,7 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "1.5";
+        const string AppVersion = "1.6";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
@@ -509,10 +509,14 @@ namespace MoflexStudio
             Text = "Moflex Studio";
             Font = new Font("Segoe UI", 9f);
             ClientSize = new Size(984, 600);
-            FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             BuildUi();
+            // resizable + snappable: the editor keeps its size, the queue column takes the rest.
+            // 936 wide still fits a half-screen snap on a 1920 display.
+            FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true;
+            MinimumSize = SizeFromClientSize(new Size(936, 600));
+            Resize += delegate { LayoutQueueColumn(); };
             LoadSettings();
             ClearEditor();
             LoadQueue();
@@ -823,6 +827,39 @@ namespace MoflexStudio
         }
 
         void SetStatus(string s) { lblStatus.Text = s ?? ""; }
+
+        // the queue column (x 628..) and status bar follow the window size; the editor stays put.
+        // Designed at 984x600: extra height is split between the queue list and the log.
+        void LayoutQueueColumn()
+        {
+            if (lvQueue == null || WindowState == FormWindowState.Minimized) return;
+            int W = ClientSize.Width, H = ClientSize.Height;
+            if (W < 300 || H < 300) return;
+            int qx = 628, qw = Math.Max(300, W - 636), dh = Math.Max(0, H - 600), dq = dh / 2;
+            SuspendLayout();
+            lvQueue.SetBounds(qx, 8, qw, 290 + dq);
+            lvQueue.Columns[0].Width = Math.Max(120, qw - 138);
+            QRow(qx, qw, 304 + dq, 4, new Control[] { btnEdit, btnRemove, btnUp, btnDown, btnClearDone }, new[] { 62, 66, 48, 52, 104 });
+            QRow(qx, qw, 336 + dq, 6, new Control[] { btnStart, btnPause, btnStop }, new[] { 132, 102, 102 });
+            lblStage.SetBounds(qx, 376 + dq, qw, 18);
+            pbStage.SetBounds(qx, 396 + dq, qw, 18);
+            lblDetail.SetBounds(qx, 418 + dq, qw, 18);
+            txtLog.SetBounds(qx, 440 + dq, qw, 130 + dh - dq);
+            lblStatus.SetBounds(8, 578 + dh, W - 204, 18);
+            pbTools.SetBounds(W - 188, 578 + dh, 180, 16);
+            ResumeLayout();
+        }
+        // one row of buttons spread across the column, each keeping its share of the designed width
+        static void QRow(int x0, int width, int y, int gap, Control[] cs, int[] ws)
+        {
+            int total = ws.Sum(), avail = width - gap * (cs.Length - 1), x = x0;
+            for (int i = 0; i < cs.Length; i++)
+            {
+                int w = i == cs.Length - 1 ? x0 + width - x : ws[i] * avail / total;
+                cs[i].SetBounds(x, y, w, cs[i].Height);
+                x += w + gap;
+            }
+        }
 
         // work folders left behind by a crash or power cut (only when no other copy of the app is running)
         void CleanStaleWork()
@@ -2307,6 +2344,12 @@ namespace MoflexStudio
                     pbStage.Value = 100;
                     lblDetail.Text = string.Format("{0}  ({1:0.0} MB)", Path.GetFileName(q.Output), J.F(J.G(ev, "size")) / 1048576.0);
                     Log("done: " + q.Output);
+                    var warns = J.A(J.G(ev, "warnings"));
+                    if (warns.Length > 0)
+                    {
+                        q.Status += " - check log";
+                        foreach (var w in warns) Log("! warning: " + J.S(w));
+                    }
                     RefreshQ(q);
                     break;
                 case "error":
