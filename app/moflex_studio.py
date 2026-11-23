@@ -1758,6 +1758,8 @@ def nfo_section(md, is3d):
         lines.append(f"tmdb={md['tmdb_id']}")
     if md.get('conv3d'):                 # made 3D from 2D: by what, with which settings
         lines.append(f"conv3d={f(str(md['conv3d']))}")
+    if md.get('encoder'):                # which moflex encoder made the video, and how
+        lines.append(f"encoder={f(str(md['encoder']))}")
     return section(b'NFO0', ('\n'.join(lines) + '\n').encode('utf-8'))
 
 KINDS = ('movie', 'episode', 'short', 'musicvideo')
@@ -1958,6 +1960,11 @@ def assemble(job, moflex_in, existing, work, default_audio_file, is3d):
     # ---- metadata
     md = job.get('metadata')
     if md:
+        # how the video was made (conv3d=, encoder=) belongs to the video: an edit of the info keeps it
+        # unless this run made the video anew
+        for k in ('conv3d', 'encoder'):
+            if not md.get(k) and (existing.get('nfo') or {}).get(k):
+                md[k] = existing['nfo'][k]
         secs.append(nfo_section(md, is3d))
     elif b'NFO0' in old:
         secs.append(old[b'NFO0'])
@@ -2223,6 +2230,11 @@ def run_job(jobfile):
                 nxt = base + 2
             job['_video_only'] = True                        # the encoder got no audio; assemble adds track 1
             job['_duration'] = info['duration']
+            kb = int(job.get('bitrate') or 1400)
+            job['_encoder'] = (f"open moflex-ffmpeg aq{open_aq_offset(kb, is3d)} ~{kb}k" if use_open(job)
+                               else f"mobiclip {kb}k 2-pass")
+            if job.get('metadata'):
+                job['metadata']['encoder'] = job['_encoder']
             moflex_in, existing = enc, read_trailer(enc)
             n_stage = encode_versions(job, work, is3d, nxt, total)
         else:
@@ -2260,7 +2272,17 @@ def run_job(jobfile):
             shutil.copyfile(poster_full, os.path.splitext(final)[0] + '.jpg')
         sbs = job.get('_sbs')
         if sbs and os.path.exists(sbs) and iw3_settings(job.get('conv3d')).get('keep_sbs'):
-            shutil.move(sbs, os.path.splitext(final)[0] + '_LRF_Full_SBS.mp4')   # kept, as asked
+            # kept, as asked: beside the moflex, named the way iw3 names it -- the SOURCE's name +
+            # _LRF_Full_SBS ("Full SBS" also tells Studio and Big Top its layout, if it's used again)
+            keep = os.path.join(os.path.dirname(final),
+                                os.path.splitext(os.path.basename(job['source']))[0] + '_LRF_Full_SBS.mp4')
+            if os.path.exists(keep) and not job.get('overwrite'):
+                stem, n = keep[:-4], 2
+                while os.path.exists(f'{stem} ({n}).mp4'):
+                    n += 1
+                keep = f'{stem} ({n}).mp4'
+            shutil.move(sbs, keep)
+            log(f'kept the 3D side-by-side video: {keep}', 'super')
         emit('done', output=final, size=os.path.getsize(final), seconds=round(time.time() - t0, 1),
              warnings=job.get('_warnings') or [])
     finally:

@@ -486,7 +486,7 @@ namespace MoflexStudio
         TabControl tabs;
         ComboBox cmbLayout; RadioButton rad3D, rad2D; NumericUpDown numBitrate; Label lblVideoNote;
         CheckBox chkConv3d, chkKeepSbs; ComboBox cmbTpl; Button btnTplEdit, btnIw3Install; Label lblIw3;
-        Dict iw3Status; Dict conv3dOver = new Dict(); bool iw3Installing;
+        Dict iw3Status; Dict conv3dOver = new Dict(); bool iw3Installing, tplRefilling;
         AudioPicker audio1, audio2;           // audio2 = the editor for one extra track (2..8)
         ListView lvAud; Label lblAudCount;
         ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout, cmbVerAudio;
@@ -595,7 +595,9 @@ namespace MoflexStudio
             btnIw3Install = Add(tVideo, new Button { Text = "Install iw3...", Left = 506, Top = 134, Width = 82, Height = 25, Visible = false });
             lblVideoNote = Note(tVideo, "", 10, 164, 576, 50);
             chkConv3d.CheckedChanged += delegate { if (chkConv3d.Checked) rad3D.Checked = true; UpdateVideoNote(); UpdateAutoName(); };
-            cmbTpl.SelectedIndexChanged += delegate { conv3dOver.Clear(); UpdateVideoNote(); };
+            // a template the user picks starts clean; refilling the list (RefreshIw3) is not a pick and must
+            // keep "Use for this video" changes (it used to wipe them: the job ran the plain template)
+            cmbTpl.SelectedIndexChanged += delegate { if (!tplRefilling) conv3dOver.Clear(); UpdateVideoNote(); };
             btnTplEdit.Click += delegate { EditIw3Settings(); };
             btnIw3Install.Click += async delegate { await InstallIw3(); };
             var grpVer = Add(tVideo, new GroupBox { Text = "Other versions of the film  (CLOWNSEC player: VIDEO > Version)", Left = 8, Top = 216, Width = 580, Height = 196 });
@@ -1429,7 +1431,9 @@ namespace MoflexStudio
             rad3D.Checked = J.S(J.G(job, "output")) != "2d"; rad2D.Checked = !rad3D.Checked;
             {
                 var cv = J.D(J.G(job, "conv3d"));
-                SelectItem(cmbTpl, cv != null && J.S(J.G(cv, "template")) != "" ? J.S(J.G(cv, "template")) : "best");
+                tplRefilling = true;
+                try { SelectItem(cmbTpl, cv != null && J.S(J.G(cv, "template")) != "" ? J.S(J.G(cv, "template")) : "best"); }
+                finally { tplRefilling = false; }
                 conv3dOver = new Dict();
                 if (cv != null) foreach (var kv in cv) if (kv.Key != "enabled" && kv.Key != "template" && kv.Key != "keep_sbs") conv3dOver[kv.Key] = kv.Value;
                 chkConv3d.Checked = cv != null && J.B(J.G(cv, "enabled"));
@@ -2504,10 +2508,15 @@ namespace MoflexStudio
             try { iw3Status = J.D(await Backend.Call("iw3-status")); }
             catch (Exception ex) { lblIw3.Text = "iw3: " + ex.Message; return; }
             string keep = select ?? TplName();
-            cmbTpl.Items.Clear();
-            foreach (var kv in J.D(J.G(iw3Status, "templates")) ?? new Dict())
-                cmbTpl.Items.Add(new Item(J.S(J.G(kv.Value, "label")) + (J.B(J.G(kv.Value, "builtin")) ? "" : "  (yours)"), kv.Key));
-            SelectItem(cmbTpl, keep); if (cmbTpl.SelectedIndex < 0 && cmbTpl.Items.Count > 0) cmbTpl.SelectedIndex = 0;
+            tplRefilling = true;
+            try
+            {
+                cmbTpl.Items.Clear();
+                foreach (var kv in J.D(J.G(iw3Status, "templates")) ?? new Dict())
+                    cmbTpl.Items.Add(new Item(J.S(J.G(kv.Value, "label")) + (J.B(J.G(kv.Value, "builtin")) ? "" : "  (yours)"), kv.Key));
+                SelectItem(cmbTpl, keep); if (cmbTpl.SelectedIndex < 0 && cmbTpl.Items.Count > 0) cmbTpl.SelectedIndex = 0;
+            }
+            finally { tplRefilling = false; }
             bool ok = J.B(J.G(iw3Status, "installed"));
             lblIw3.Text = ok ? "iw3 found" : "iw3 not installed";
             btnIw3Install.Text = "Install iw3...";
