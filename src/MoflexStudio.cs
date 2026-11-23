@@ -790,13 +790,26 @@ namespace MoflexStudio
             chkRememberOut = Add(tSet, new CheckBox { Text = "Remember the last output folder (unticked: always start at the folder above)", Left = 108, Top = 142, Width = 478, Checked = true });
             var bSave = Add(tSet, new Button { Text = "Save settings", Left = 108, Top = 170, Width = 120, Height = 27 });
             bSave.Click += delegate { SaveSettings(); SetStatus("Settings saved."); };
-            var grp = Add(tSet, new GroupBox { Text = "Tools", Left = 8, Top = 210, Width = 578, Height = 196 });
-            lblTools = new Label { Left = 12, Top = 22, Width = 556, Height = 120, Font = new Font("Consolas", 9f) };
+            var grp = Add(tSet, new GroupBox { Text = "Tools", Left = 8, Top = 200, Width = 578, Height = 212 });
+            lblTools = new Label { Left = 12, Top = 20, Width = 556, Height = 96, Font = new Font("Consolas", 9f) };
             grp.Controls.Add(lblTools);
-            btnDownload = new Button { Text = "Download missing tools", Left = 12, Top = 150, Width = 180, Height = 27 };
-            var bAppDir = new Button { Text = "Open app folder", Left = 198, Top = 150, Width = 130, Height = 27 };
-            btnUpdate = new Button { Text = "Check for updates", Left = 334, Top = 150, Width = 130, Height = 27 };
-            lblVersion = new Label { Text = "Version " + AppVersion, Left = 470, Top = 156, Width = 100, ForeColor = SystemColors.GrayText };
+            // 2D -> 3D: which iw3, its models
+            var bIw3Inst = new Button { Text = "Install iw3...", Left = 12, Top = 120, Width = 110, Height = 27 };
+            var bIw3Mine = new Button { Text = "Use my iw3...", Left = 128, Top = 120, Width = 110, Height = 27 };
+            var bIw3Models = new Button { Text = "Models...", Left = 244, Top = 120, Width = 90, Height = 27 };
+            var nIw3 = new Label { Text = "2D \u2192 3D (optional): install iw3 into Studio's folder, or use one you have", Left = 340, Top = 118, Width = 230, Height = 32, ForeColor = SystemColors.GrayText };
+            grp.Controls.AddRange(new Control[] { bIw3Inst, bIw3Mine, bIw3Models, nIw3 });
+            bIw3Inst.Click += async delegate { await InstallIw3(); };
+            bIw3Mine.Click += async delegate { await UseMyIw3(); };
+            bIw3Models.Click += async delegate
+            {
+                if (!J.B(J.G(iw3Status, "installed"))) { SetStatus("Install iw3 first (or use yours)."); return; }
+                await ManageModels(this); await RefreshIw3(null);
+            };
+            btnDownload = new Button { Text = "Download missing tools", Left = 12, Top = 172, Width = 180, Height = 27 };
+            var bAppDir = new Button { Text = "Open app folder", Left = 198, Top = 172, Width = 130, Height = 27 };
+            btnUpdate = new Button { Text = "Check for updates", Left = 334, Top = 172, Width = 130, Height = 27 };
+            lblVersion = new Label { Text = "Version " + AppVersion, Left = 470, Top = 178, Width = 100, ForeColor = SystemColors.GrayText };
             grp.Controls.Add(btnDownload); grp.Controls.Add(bAppDir); grp.Controls.Add(btnUpdate); grp.Controls.Add(lblVersion);
             btnUpdate.Click += async delegate { await CheckUpdate(true); };
             btnDownload.Click += async delegate { await CheckTools(true); };
@@ -1001,14 +1014,26 @@ namespace MoflexStudio
             string lic = ToolPath("license", Path.Combine(appDir, "User_CTR.lic"));
             Func<bool, string> ok = b => b ? "OK     " : "MISSING";
             Func<string, string> rel = x => x.StartsWith(appDir, StringComparison.OrdinalIgnoreCase) ? "app" + x.Substring(appDir.Length) : x;
-            lblTools.Text = string.Format("{0}  Python      {1}\n{2}  ffmpeg      {3}\n{4}  Mobiclip    {5}\n{6}  RunAsDate   {7}\n{8}  license     {9}",
-                ok(py), rel(Backend.Python), ok(ff), rel(bin), ok(File.Exists(enc)), rel(enc), ok(File.Exists(rad)), rel(rad), ok(File.Exists(lic)), rel(lic)) +
-                (File.Exists(enc) ? "" : "\n\nWithout the encoder, video files can't be converted (moflex editing still works).");
+            toolsText = string.Format("{0}  Python      {1}\n{2}  ffmpeg      {3}\n{4}  Mobiclip    {5}\n{6}  RunAsDate   {7}\n{8}  license     {9}",
+                ok(py), rel(Backend.Python), ok(ff), rel(bin), ok(File.Exists(enc)), rel(enc), ok(File.Exists(rad)), rel(rad), ok(File.Exists(lic)), rel(lic));
+            toolsNote = File.Exists(enc) ? "" : "Without the Mobiclip encoder, video files can't be converted (moflex editing still works).";
+            UpdateToolsLabel();
             toolsReady = py && ff;
             btnAdd.Enabled = btnStart.Enabled = btnOpen.Enabled = toolsReady && !queueActive;
             if (!toolsReady) { SetStatus("Python / ffmpeg missing: Settings > Download missing tools."); tabs.SelectedIndex = 5; }
             else if (lblStatus.Text == "" || lblStatus.Text.StartsWith("Tools")) SetStatus("Ready. " + (File.Exists(enc) ? "" : "(Mobiclip encoder missing: only moflex editing works.)"));
         }
+
+        string toolsText = "", toolsNote = "";
+        void UpdateToolsLabel()
+        {
+            string iw3 = iw3Status == null ? "...      iw3 (2D->3D) checking"
+                : J.B(J.G(iw3Status, "installed"))
+                    ? "OK       iw3 (2D->3D) " + RelApp(J.S(J.G(iw3Status, "dir"))) + "  (" + J.A(J.G(iw3Status, "catalog")).Count(m => J.B(J.G(m, "have"))) + " depth models)"
+                    : "-        iw3 (2D->3D) not installed (optional)";
+            lblTools.Text = toolsText + "\n" + iw3 + (toolsNote != "" ? "\n" + toolsNote : "");
+        }
+        string RelApp(string x) { return x.StartsWith(appDir, StringComparison.OrdinalIgnoreCase) ? "app" + x.Substring(appDir.Length) : x; }
 
         // ============================================================ self-update
         static string Http(string url)
@@ -2454,7 +2479,9 @@ namespace MoflexStudio
             SelectItem(cmbTpl, keep); if (cmbTpl.SelectedIndex < 0 && cmbTpl.Items.Count > 0) cmbTpl.SelectedIndex = 0;
             bool ok = J.B(J.G(iw3Status, "installed"));
             lblIw3.Text = ok ? "iw3 found" : "iw3 not installed";
+            btnIw3Install.Text = "Install iw3...";
             btnIw3Install.Visible = !ok;
+            UpdateToolsLabel();
             UpdateVideoNote();
         }
 
@@ -2683,13 +2710,8 @@ namespace MoflexStudio
             var kBorder = (CheckBox)row("", new CheckBox { Text = "Preserve the screen border", Width = 220, Checked = J.B(J.G(c, "preserve_border")) });
             var nCrf = (NumericUpDown)row("Intermediate quality (CRF)", num(J.G(c, "crf"), 0, 40, 1, 0));
             y += 4;
-            f.Controls.Add(new Label { Text = "iw3 folder", Left = 12, Top = y + 3, Width = 80 });
-            var tDir = new TextBox { Left = 96, Top = y, Width = 324, Text = J.S(J.G(settings, "iw3_dir")) };
-            var bDir = new Button { Text = "...", Left = 424, Top = y - 1, Width = 34, Height = 25 };
-            bDir.Click += delegate { var pth = PickFolder(tDir.Text); if (pth != null) tDir.Text = pth; };
-            f.Controls.Add(tDir); f.Controls.Add(bDir); y += 30;
-            var bModels = new Button { Text = "Models...", Left = 96, Top = y, Width = 100, Height = 26, Enabled = J.B(J.G(iw3Status, "installed")) };
-            f.Controls.Add(new Label { Text = "the depth models downloaded, their sizes; delete or download", Left = 202, Top = y + 5, Width = 260, ForeColor = SystemColors.GrayText });
+            var bModels = new Button { Text = "Models...", Left = 12, Top = y, Width = 100, Height = 26, Enabled = J.B(J.G(iw3Status, "installed")) };
+            f.Controls.Add(new Label { Text = "download or delete depth models (which iw3 is used: Settings tab)", Left = 118, Top = y + 5, Width = 340, ForeColor = SystemColors.GrayText });
             bModels.Click += async delegate { await ManageModels(f); };
             f.Controls.Add(bModels); y += 36;
             var bOk = new Button { Text = "Use for this video", Left = 12, Top = y, Width = 130, Height = 28, DialogResult = DialogResult.OK };
@@ -2726,7 +2748,6 @@ namespace MoflexStudio
                 catch (Exception ex) { MessageBox.Show(f, ex.Message); }
             };
             var res = f.ShowDialog(this);
-            if (tDir.Text.Trim() != J.S(J.G(settings, "iw3_dir"))) { settings["iw3_dir"] = tDir.Text.Trim(); try { SaveSettings(); } catch { } }
             if (saved != null) { conv3dOver.Clear(); var _ = RefreshIw3(saved); return; }
             if (deleted) { conv3dOver.Clear(); var _ = RefreshIw3("best"); return; }
             if (res == DialogResult.OK)
