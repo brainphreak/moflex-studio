@@ -18,6 +18,8 @@ Commands (JSON out, for the GUI):
   tmdb-search <movie|tv> <query> [year]
   tmdb-details <movie|tv> <id> [S:E]
   run <job.json>                       one job; one JSON event per line
+  make SOURCE [options]                the same from command-line options, for people (make --help)
+  iw3-status                           2D to 3D: is iw3 installed, its models, defaults and templates
 
 Job (every field optional except source):
 {
@@ -82,6 +84,7 @@ def load_settings():
         'tools_dir': os.path.join(HERE, 'tools'),
         'tmdb_token': '',
         'max_fps': 30,
+        'iw3_dir': '',                  # iw3 (nunif's Windows package); '' = look in the usual places
     }
     p = os.path.join(HERE, 'settings.json')
     if os.path.exists(p):
@@ -110,10 +113,141 @@ def tools():
     import ass_to_srt
     return msm, mas, ass_to_srt
 
+HUMAN = False   # the 'make' command: plain lines for a person instead of JSON events for the GUI
+
 def emit(_type, **kw):
     kw['type'] = _type
+    if HUMAN:
+        return human(kw)
     sys.__stdout__.write(json.dumps(kw, ensure_ascii=False) + '\n')
     sys.__stdout__.flush()
+
+_last_pct = [None, -10.0]
+def human(e):
+    """one event as a person reads it: stages and warnings on their own line, progress on one updating line"""
+    t, out = e['type'], sys.__stdout__
+    if t == 'progress':
+        pct = e.get('pct') or 0
+        if e.get('stage') != _last_pct[0] or pct - _last_pct[1] >= 1 or pct >= 100:
+            _last_pct[0], _last_pct[1] = e.get('stage'), pct
+            eta = f", about {clock(e['eta'])} left" if e.get('eta') else ''
+            out.write(f"\r  {pct:5.1f}%{eta}        ")
+            out.flush()
+        return
+    if t == 'stage':
+        out.write(f"\n[{e.get('index')}/{e.get('total')}] {e.get('text')}\n")
+    elif t == 'log' and str(e.get('text', '')).startswith('WARNING'):
+        out.write(f"\n  {e['text']}\n")
+    elif t == 'start':
+        out.write(f"{os.path.basename(e.get('source', ''))}: {e.get('kind')} -> {e.get('output', '').upper()}"
+                  f", {clock(e.get('duration') or 0)}\n")
+    elif t == 'done':
+        mb = (e.get('size') or 0) / 1048576
+        out.write(f"\nDone in {clock(e.get('seconds') or 0)}: {e.get('output')} ({mb:.0f} MB)\n")
+        for w in e.get('warnings') or []:
+            out.write(f"  check: {w}\n")
+    elif t == 'error':
+        out.write(f"\nError: {e.get('message')}\n")
+    out.flush()
+
+MAKE_HELP = """moflex-studio make -- one video (or moflex) into a SUPER MOFLEX, from the command line
+
+  moflex-studio make SOURCE [options]
+
+  --3d | --2d                 what to encode (default: 3D for a 3D source or with --conv3d, else 2D)
+  --source-type T             auto (default), 2d, hsbs, fsbs: how the source's picture is laid out
+  --conv3d [TEMPLATE]         make a 2D source 3D with iw3 first: best (default), high, medium, low,
+                              or a template of your own (see --templates)
+  --keep-sbs                  keep iw3's 3D side-by-side video beside the output
+  --templates                 list the 2D-to-3D templates and exit
+  --title T  --year Y         the info (default: from the file name)
+  --category C                Movies (default), TV Shows, Shorts, Music Videos
+  --genres G  --desc D        more info
+  --tmdb                      look the info and poster up on TMDB (needs a TMDB token in Studio's settings)
+  --poster FILE|URL           a poster
+  --bitrate KBPS              the moflex video bitrate (default 1400)
+  --out DIR                   where the output goes (default: beside the source)
+  --name NAME                 the output's file name (default: "Title (Year) (3D) (S).moflex")
+  --plain                     a plain moflex (no SUPER MOFLEX info, subtitles or extra audio)
+  --keep-work                 keep the work folder (for looking into a problem)
+  --json                      JSON events instead of plain lines (what the GUI reads)
+
+Examples:
+  moflex-studio make "Ace Ventura (1994).mkv" --conv3d
+  moflex-studio make "Ace Ventura (1994).mkv" --conv3d low --out D:\\3DS
+  moflex-studio make "Avatar (2009) Half SBS.mkv" --3d --source-type hsbs --tmdb
+"""
+
+def make_cmd(argv):
+    """the 'make' command: a job from command-line options, then run it"""
+    global HUMAN
+    import argparse
+    ap = argparse.ArgumentParser(prog='moflex-studio make', add_help=False)
+    ap.add_argument('source', nargs='?')
+    ap.add_argument('--3d', dest='out3d', action='store_true')
+    ap.add_argument('--2d', dest='out2d', action='store_true')
+    ap.add_argument('--source-type', default='auto', choices=['auto', '2d', 'hsbs', 'fsbs'])
+    ap.add_argument('--conv3d', nargs='?', const='best')
+    ap.add_argument('--keep-sbs', action='store_true')
+    ap.add_argument('--templates', action='store_true')
+    ap.add_argument('--title'); ap.add_argument('--year', type=int)
+    ap.add_argument('--category', default='Movies'); ap.add_argument('--genres'); ap.add_argument('--desc')
+    ap.add_argument('--tmdb', action='store_true'); ap.add_argument('--poster')
+    ap.add_argument('--bitrate', type=int); ap.add_argument('--out'); ap.add_argument('--name')
+    ap.add_argument('--plain', action='store_true'); ap.add_argument('--keep-work', action='store_true')
+    ap.add_argument('--json', action='store_true')
+    ap.add_argument('-h', '--help', action='store_true')
+    a = ap.parse_args(argv)
+    HUMAN = not a.json
+    if a.help or (not a.source and not a.templates):
+        print(MAKE_HELP); return
+    if a.templates:
+        for k, v in iw3_templates().items():
+            c = iw3_settings({'template': k})
+            print(f"  {k:<10} {v.get('label', ''):<40} {c['model']}, depth {c['resolution']}, {c['method']}"
+                  f"{'' if v.get('builtin') else '  (yours)'}")
+        return
+    src = os.path.abspath(a.source)
+    if not os.path.isfile(src):
+        raise RuntimeError(f'no such file: {src}')
+    info = probe(src)
+    title, year, se = info['parsed']['title'], info['parsed']['year'], info['parsed']['season_episode']
+    md = {'title': a.title or title, 'year': a.year or year or 0, 'category': a.category,
+          'genres': a.genres or '', 'desc': a.desc or ''}
+    if se and not a.title:
+        md['season_episode'] = se
+        md['category'] = 'TV Shows' if a.category == 'Movies' else a.category
+    if a.tmdb:
+        kind = 'tv' if md.get('season_episode') else 'movie'
+        hits = tmdb_search(kind, md['title'], md['year'] or None)
+        if hits:
+            d = tmdb_details(kind, hits[0]['id'], md.get('season_episode'))
+            md.update({k: v for k, v in d.items() if v})
+    job = {'source': src, 'source_type': a.source_type, 'metadata': md, 'super': not a.plain,
+           'output_dir': os.path.abspath(a.out) if a.out else '', 'keep_work': a.keep_work}
+    if a.conv3d:
+        if a.conv3d not in iw3_templates():
+            raise RuntimeError(f"no 2D-to-3D template '{a.conv3d}' (see --templates)")
+        job['conv3d'] = {'enabled': True, 'template': a.conv3d, 'keep_sbs': a.keep_sbs}
+        job['source_type'] = '2d' if a.source_type == 'auto' else a.source_type
+    if info['kind'] == 'video':
+        is3d_src = (job['source_type'] if job['source_type'] != 'auto' else info['video']['detected']) != '2d'
+        job['output'] = '2d' if a.out2d else '3d' if (a.out3d or a.conv3d or is3d_src) else '2d'
+    elif a.out3d or a.out2d:
+        job['output'] = '3d' if a.out3d else '2d'
+    if a.bitrate:
+        job['bitrate'] = a.bitrate
+    if a.name:
+        job['output_name'] = a.name
+    if a.poster:
+        job['art'] = a.poster
+    fd, jobfile = tempfile.mkstemp(prefix='moflex_job_', suffix='.json')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(job, f)
+    try:
+        run_job(jobfile)
+    finally:
+        os.remove(jobfile)
 
 def log(text, stage=None):
     emit('log', stage=stage, text=text)
@@ -425,15 +559,49 @@ def export_art(path, out_png):
     return out_png
 
 # ------------------------------------------------------------------ TMDB
+TMDB_PROXY = 'https://clownsec.com/bigtop/tmdb.php'   # holds a TMDB key: no token of your own needed
+
 def tmdb(path, **params):
     import urllib.request, urllib.parse
-    if not S['tmdb_token']:
-        raise RuntimeError('no TMDB token set')
+    if not S['tmdb_token']:   # through clownsec.com (the lookups Big Top uses; same answers as TMDB's)
+        return tmdb_proxy(path, params)
     q = urllib.parse.urlencode(params)
     req = urllib.request.Request(f'https://api.themoviedb.org/3/{path}' + (f'?{q}' if q else ''))
     req.add_header('Authorization', f'Bearer {S["tmdb_token"]}')
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
+
+def tmdb_proxy(path, params):
+    """one TMDB lookup through clownsec.com's proxy (see its tmdb.php for what it answers)"""
+    import urllib.request, urllib.parse
+    m = re.match(r'^(search/movie|search/tv|movie/(\d+)|tv/(\d+)(?:/season/(\d+)(?:/episode/(\d+))?)?)$', path)
+    if not m:
+        raise RuntimeError(f'TMDB lookup {path} needs a TMDB token of your own (Settings)')
+    episode = None
+    if path.startswith('search/'):
+        q = {'q': 'search_movie' if path == 'search/movie' else 'search_tv', 'query': params.get('query', '')}
+        y = params.get('year') or params.get('first_air_date_year')
+        if y:
+            q['year'] = y
+    elif m.group(2):
+        q = {'q': 'movie', 'id': m.group(2)}
+    elif m.group(4) is not None:
+        q = {'q': 'tv_season', 'id': m.group(3), 'season': m.group(4)}
+        episode = m.group(5)
+    else:
+        q = {'q': 'tv', 'id': m.group(3)}
+    req = urllib.request.Request(TMDB_PROXY + '?' + urllib.parse.urlencode(q),
+                                 headers={'User-Agent': 'moflex-studio'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        d = json.load(r)
+    if d.get('not_found'):
+        raise RuntimeError('not found on TMDB')
+    if episode is not None:   # the proxy answers a whole season: the episode from it
+        e = next((x for x in d.get('episodes') or [] if str(x.get('episode_number')) == episode), None)
+        if not e:
+            raise RuntimeError('episode not found on TMDB')
+        return e
+    return d
 
 def tmdb_search(kind, query, year=None):
     if kind == 'tv':
@@ -535,17 +703,174 @@ def avi_secs(avi):
     except Exception:
         return None
 
-def make_avi(job, info, layout, avi):
+def make_avi(job, info, layout, avi, src=None):
     """video only: with an audio stream the Mobiclip encoder's final write runs single-threaded at
     ~1.7x realtime (45 min for a movie); without one the whole encode takes minutes. Track 1 is
     added afterwards by assemble() (it replaced the encoder's audio with the normalised one anyway)."""
     cmd = [FFMPEG, '-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-nostats',
-           '-progress', 'pipe:1', '-i', job['source']]
+           '-progress', 'pipe:1', '-i', src or job['source']]
     cmd += ['-filter_complex', video_filter(info['video'], layout, job['output'], S['max_fps']), '-map', '[v]']
     if info['duration']:
         cmd += ['-t', f"{info['duration']:.3f}"]
     cmd += ['-an', '-sn', '-dn', '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', avi]
     ffmpeg_progress(cmd, info['duration'], 'avi')
+
+# ------------------------------------------------------------------ stage 0: 2D -> 3D with iw3
+# A 2D source made into 3D by iw3 (github.com/nagadomi/nunif, MIT): on the full-size picture, into a
+# full side-by-side video the rest of the pipeline takes as any FSBS source. Audio and subtitles
+# still come from the original file. Not real time (an RTX 4090: ~0.6x for 1080p with Distill_Any_L).
+
+# the defaults: the settings tuned for the 3DS by hand in iw3's GUI (a lot of trial and error went
+# into these -- see the 2D-to-3D notes), with Distill-Any-Depth Large
+IW3_DEFAULTS = {
+    'model': 'Distill_Any_L',
+    'divergence': 1.7,              # "3D Strength"
+    'convergence': 0.65,            # "Convergence Plane"
+    'convergence_mode': 'sod_v1',   # ... automatic, by the salient object
+    'ipd_offset': 0,                # "Your Own Size"
+    'synthetic_view': 'both',
+    'method': 'mlbw_l2s',
+    'stereo_width': 0,              # "Stereo Processing Width" (0 = Default)
+    'resolution': 512,              # "Depth Resolution"
+    'limit_resolution': True,       # ... "Limit to source"
+    'foreground_scale': 0,
+    'edge_dilation': [3, 1],        # "Edge Fix"
+    'depth_aa': False,
+    'ema': True,                    # "Flicker Reduction"
+    'ema_decay': 0.99,
+    'ema_buffer': 30,
+    'scene_detect': False,          # "Scene Boundary Detection"
+    'preserve_border': True,        # "Preserve Screen Border"
+    'crf': 20,                      # the intermediate SBS video (shrunk to 400x240 later anyway)
+    'keep_sbs': False,              # keep the 3D SBS video beside the output
+}
+# Templates: the easy choice. Each is IW3_DEFAULTS with a few changes; the name goes into the file's
+# conv3d= label. The user's own are kept in iw3_templates.json beside this file ({name: {label, ...}}).
+IW3_TEMPLATES = {
+    'best':   {'label': 'Best quality (top graphics card)'},
+    'high':   {'label': 'High quality', 'model': 'Distill_Any_B'},
+    'medium': {'label': 'Medium quality', 'model': 'Distill_Any_S'},
+    'low':    {'label': 'Low quality (low-end graphics card)', 'model': 'Distill_Any_S', 'resolution': 392,
+               'method': 'row_flow_v3', 'convergence_mode': 'constant'},
+}
+IW3_TEMPLATES_FILE = os.path.join(HERE, 'iw3_templates.json')
+
+def iw3_templates():
+    """the built-in templates, then the user's own (which may replace a built-in one by name)"""
+    t = {k: dict(v, builtin=True) for k, v in IW3_TEMPLATES.items()}
+    try:
+        with open(IW3_TEMPLATES_FILE, encoding='utf-8-sig') as f:
+            for k, v in json.load(f).items():
+                t[str(k)] = dict(v, builtin=False)
+    except (OSError, ValueError):
+        pass
+    return t
+
+def iw3_settings(c):
+    """a job's conv3d: its template (default 'best') with any settings it gives on top"""
+    c = c or {}
+    tpl = iw3_templates().get(c.get('template') or 'best') or {}
+    out = dict(IW3_DEFAULTS)
+    out.update({k: v for k, v in tpl.items() if k in IW3_DEFAULTS})
+    out.update({k: v for k, v in c.items() if k in IW3_DEFAULTS})
+    out['template'] = c.get('template') or 'best'
+    return out
+
+IW3_MODELS = ['Distill_Any_L', 'Distill_Any_B', 'Distill_Any_S', 'VDA_L', 'VDA_B', 'VDA_S',
+              'VDA_Stream_L', 'Any_V2_L', 'Any_V2_B', 'Any_V2_S', 'Any_L', 'Any_B', 'Any_S',
+              'DepthPro', 'DepthPro_S', 'ZoeD_Any_N', 'ZoeD_N']
+
+def iw3_dirs():
+    """where iw3 may be: the settings' folder, the usual Documents\\iw3, Studio's own install"""
+    out = []
+    if S.get('iw3_dir'):
+        out.append(S['iw3_dir'])
+    home = os.path.expanduser('~')
+    out += [os.path.join(home, 'Documents', 'iw3'),
+            os.path.join(os.environ.get('LOCALAPPDATA', home), 'Moflex Studio', 'iw3')]
+    return out
+
+def iw3_find():
+    """(root, python.exe) of a working iw3 install, or (None, None). root holds python\\, nunif\\, git\\"""
+    for d in iw3_dirs():
+        py = os.path.join(d, 'python', 'python.exe' if IS_WIN else 'python')
+        if os.path.isfile(py) and os.path.isdir(os.path.join(d, 'nunif', 'iw3')):
+            return d, py
+    return None, None
+
+def iw3_args(c):
+    """iw3's command-line options for a 2D-to-3D setting set (IW3_DEFAULTS' keys)"""
+    a = ['--depth-model', c['model'], '--divergence', str(c['divergence']), '--convergence', str(c['convergence']),
+         '--convergence-mode', c['convergence_mode'], '--ipd-offset', str(int(c['ipd_offset'])),
+         '--synthetic-view', c['synthetic_view'], '--method', c['method'],
+         '--foreground-scale', str(c['foreground_scale'])]
+    if int(c.get('stereo_width') or 0) > 0:
+        a += ['--stereo-width', str(int(c['stereo_width']))]
+    if int(c.get('resolution') or 0) > 0:
+        a += ['--resolution', str(int(c['resolution']))]
+        if c.get('limit_resolution'):
+            a.append('--limit-resolution')
+    ed = c.get('edge_dilation') or [0]
+    a += ['--edge-dilation'] + [str(int(x)) for x in (ed if isinstance(ed, list) else [ed])]
+    if c.get('depth_aa'):
+        a.append('--depth-aa')
+    if c.get('ema'):
+        a += ['--ema-normalize', '--ema-decay', str(c['ema_decay']), '--ema-buffer', str(int(c['ema_buffer']))]
+    if c.get('scene_detect'):
+        a.append('--scene-detect')
+    if c.get('preserve_border'):
+        a.append('--preserve-screen-border')
+    return a + ['--video-codec', 'libx264', '--crf', str(int(c.get('crf') or 20))]
+
+def iw3_label(c):
+    """how a file was converted, kept in its info (conv3d=): so a lower model is always told apart"""
+    ed = c.get('edge_dilation') or [0]
+    ed = '/'.join(str(x) for x in (ed if isinstance(ed, list) else [ed]))
+    return (f"iw3 {c.get('template', 'custom')}: {c['model']} d{c['divergence']} c{c['convergence']}"
+            f"{' ' + c['convergence_mode'] if c['convergence_mode'] != 'constant' else ''} {c['method']}"
+            f" r{c.get('resolution') or 'def'} e{ed}{' ema' + str(c['ema_decay']) if c.get('ema') else ''}")
+
+def iw3_convert(job, info, out):
+    """the source's picture made 3D by iw3, into out (full side-by-side), with progress"""
+    root, py = iw3_find()
+    if not root:
+        raise RuntimeError('iw3 isn\'t installed: Settings > 2D to 3D > Install iw3 (or set its folder)')
+    c = iw3_settings(job.get('conv3d'))
+    if c['model'] not in IW3_MODELS:
+        raise RuntimeError(f"unknown depth model {c['model']}")
+    cmd = [py, '-m', 'iw3.cli', '-i', job['source'], '-o', out, '--yes', '--max-fps', str(S['max_fps'])] + iw3_args(c)
+    env = dict(os.environ, PYTHONUTF8='1')
+    env['PATH'] = os.pathsep.join([os.path.join(root, 'python'), os.path.join(root, 'python', 'Scripts'),
+                                   os.path.join(root, 'git', 'cmd'), env.get('PATH', '')])
+    log('iw3: ' + ' '.join(cmd[3:]), 'iw3')
+    p = subprocess.Popen(cmd, cwd=os.path.join(root, 'nunif'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         env=env, creationflags=NO_WINDOW)
+    t0 = time.time(); last = 0; buf = b''; tail = []
+    while True:
+        ch = p.stdout.read(256)
+        if not ch:
+            break
+        buf += ch
+        parts = re.split(rb'[\r\n]', buf)
+        buf = parts.pop()
+        for raw in parts:
+            line = raw.decode('utf-8', 'replace').strip()
+            if not line:
+                continue
+            tail = (tail + [line])[-12:]
+            m = re.search(r'(\d+)/(\d+) \[', line)      # tqdm: "name:  42%|####| 600/1446 [00:37<..."
+            if m and time.time() - last > 0.5 and int(m.group(2)) > 0:
+                last = time.time()
+                done, tot = int(m.group(1)), int(m.group(2))
+                pct = min(100.0, done / tot * 100)
+                el = time.time() - t0
+                emit('progress', stage='iw3', pct=round(pct, 1), elapsed=round(el, 1),
+                     eta=round(el / pct * (100 - pct), 1) if pct > 0.5 else None,
+                     speed=round(done / max(el, 0.1) / max(info['video']['fps'], 1), 2))
+    p.wait()
+    if p.returncode != 0 or not os.path.isfile(out):
+        raise RuntimeError('iw3 failed: ' + ' | '.join(tail[-5:])[-600:])
+    return iw3_label(c)
 
 # ------------------------------------------------------------------ stage 2: Mobiclip encoder
 def encoder_running():
@@ -743,6 +1068,8 @@ def nfo_section(md, is3d):
             lines.append(f"eptitle={f(str(md['eptitle']))}")
     if md.get('tmdb_id'):
         lines.append(f"tmdb={md['tmdb_id']}")
+    if md.get('conv3d'):                 # made 3D from 2D: by what, with which settings
+        lines.append(f"conv3d={f(str(md['conv3d']))}")
     return section(b'NFO0', ('\n'.join(lines) + '\n').encode('utf-8'))
 
 KINDS = ('movie', 'episode', 'short', 'musicvideo')
@@ -1133,7 +1460,7 @@ def encode_versions(job, work, is3d, first_stage, total):
     return i
 
 def run_job(jobfile):
-    with open(jobfile, encoding='utf-8') as f:
+    with open(jobfile, encoding='utf-8-sig') as f:   # -sig: a job file saved with a BOM reads too
         job = json.load(f)
     t0 = time.time()
     src = job['source']
@@ -1153,8 +1480,10 @@ def run_job(jobfile):
             layout = (job.get('source_type') or 'auto').lower()
             if layout == 'auto':
                 layout = info['video']['detected']
-            if is3d and layout == '2d':
-                raise RuntimeError('3D output needs a side-by-side source (set the source type to HSBS or FSBS)')
+            conv = is3d and layout == '2d' and bool((job.get('conv3d') or {}).get('enabled'))
+            if is3d and layout == '2d' and not conv:
+                raise RuntimeError('3D output needs a side-by-side source (set the source type to HSBS or FSBS),'
+                                   ' or turn on 2D to 3D (iw3)')
             # default audio: the source's first track (normalised) in-band
             aud = job.setdefault('audio', {})
             if 'main' not in aud and info['audio']:
@@ -1162,25 +1491,38 @@ def run_job(jobfile):
             check_fat32(estimate_size(job, info), 'The output would be about')
             check_source_lengths(job, info)
             n_alt = len(versions_to_encode(job))
-            total = 3 + 2 * n_alt
-            stages = ['avi', 'moflex'] + ['avi', 'moflex'] * n_alt + ['super']
+            total = 3 + 2 * n_alt + (1 if conv else 0)
+            stages = (['iw3'] if conv else []) + ['avi', 'moflex'] + ['avi', 'moflex'] * n_alt + ['super']
             emit('start', source=src, kind=kind, work=work, layout=layout, output=job['output'], stages=stages,
                  duration=info['duration'])
-            emit('stage', stage='avi', index=1, total=total, text='Converting to lossless AVI')
+            pic, vinfo, base = None, info, 1
+            if conv:   # 2D -> 3D first: iw3 makes the full side-by-side picture the rest works from
+                c = iw3_settings(job.get('conv3d'))
+                emit('stage', stage='iw3', index=1, total=total,
+                     text=f"Converting 2D to 3D (iw3, {c['template']}: {c['model']})")
+                pic = os.path.join(work, 'iw3_LRF_Full_SBS.mp4')
+                label = iw3_convert(job, info, pic)
+                job['_conv3d'] = label
+                if job.get('metadata'):          # recorded in the file's info (conv3d=) with the rest of it
+                    job['metadata']['conv3d'] = label
+                vinfo = dict(info, video=probe(pic)['video'])
+                layout, base = 'fsbs', 2
+                job['_sbs'] = pic
+            emit('stage', stage='avi', index=base, total=total, text='Converting to lossless AVI')
             avi = os.path.join(work, 'moflex_job.avi')
-            make_avi(job, info, layout, avi)
+            make_avi(job, vinfo, layout, avi, src=pic)
             job['_video_dur'] = avi_secs(avi)
             if job['_video_dur'] and info['duration'] - job['_video_dur'] > 2 and not job.get('_short_warned'):
                 warn(job, f"the converted video is {clock(job['_video_dur'])} but the source runs {clock(info['duration'])}"
                           ' -- the picture may be cut short')
-            emit('stage', stage='moflex', index=2, total=total,
+            emit('stage', stage='moflex', index=base + 1, total=total,
                  text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
             enc = make_moflex(job, avi, work)
             job['_video_only'] = True                        # the encoder got no audio; assemble adds track 1
             job['_duration'] = info['duration']
             os.remove(avi)                                   # only the encoder needed it
             moflex_in, existing = enc, read_trailer(enc)
-            n_stage = encode_versions(job, work, is3d, 3, total)
+            n_stage = encode_versions(job, work, is3d, base + 2, total)
         else:
             is3d = (job.get('output') or ('3d' if info['moflex']['is3d'] else '2d')).lower() == '3d'
             n_alt = len(versions_to_encode(job))
@@ -1214,6 +1556,9 @@ def run_job(jobfile):
         os.replace(tmp_final, final)
         if poster_full and os.path.exists(poster_full):
             shutil.copyfile(poster_full, os.path.splitext(final)[0] + '.jpg')
+        sbs = job.get('_sbs')
+        if sbs and os.path.exists(sbs) and iw3_settings(job.get('conv3d')).get('keep_sbs'):
+            shutil.move(sbs, os.path.splitext(final)[0] + '_LRF_Full_SBS.mp4')   # kept, as asked
         emit('done', output=final, size=os.path.getsize(final), seconds=round(time.time() - t0, 1),
              warnings=job.get('_warnings') or [])
     finally:
@@ -1236,6 +1581,12 @@ def main():
             print(json.dumps(tmdb_details(a[1], a[2], se), ensure_ascii=False, indent=1))
         elif a[0] == 'run':
             run_job(a[1])
+        elif a[0] == 'make':          # the command line for people (moflex-studio.cmd make ...)
+            make_cmd(a[1:])
+        elif a[0] == 'iw3-status':    # for the 2D to 3D panel: is iw3 here, and what it offers
+            root, py = iw3_find()
+            print(json.dumps({'installed': bool(root), 'dir': root or '', 'looked': iw3_dirs(),
+                              'models': IW3_MODELS, 'defaults': IW3_DEFAULTS, 'templates': iw3_templates()}, indent=1))
         else:
             print(__doc__); sys.exit(1)
     except SystemExit:
