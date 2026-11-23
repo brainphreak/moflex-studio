@@ -2499,12 +2499,13 @@ namespace MoflexStudio
             if (iw3Status == null) { SetStatus("Still checking for iw3..."); return; }
             var c = Iw3Current();
             var f = new Form { Text = "2D \u2192 3D settings  (" + cmbTpl.Text + ")", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(470, 498), Font = Font };
-            int y = 12;
+                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(470, 600), Font = Font,
+                AutoScaleMode = AutoScaleMode.Font };
+            int y = 10;
             Func<string, Control, Control> row = (label, ctl) =>
             {
                 f.Controls.Add(new Label { Text = label, Left = 12, Top = y + 3, Width = 170 });
-                ctl.Left = 186; ctl.Top = y; if (ctl.Width < 60) ctl.Width = 120; f.Controls.Add(ctl); y += 28; return ctl;
+                ctl.Left = 186; ctl.Top = y; if (ctl.Width < 60) ctl.Width = 120; f.Controls.Add(ctl); y += 26; return ctl;
             };
             Func<object, decimal, decimal, decimal, int, NumericUpDown> num = (v, min, max, inc, dec) =>
                 new NumericUpDown { Minimum = min, Maximum = max, Increment = inc, DecimalPlaces = dec, Width = 90,
@@ -2553,6 +2554,10 @@ namespace MoflexStudio
             var bCancel = new Button { Text = "Cancel", Left = 400, Top = y, Width = 58, Height = 28, DialogResult = DialogResult.Cancel };
             f.Controls.AddRange(new Control[] { bOk, bSave, bDel, bCancel });
             f.AcceptButton = bOk; f.CancelButton = bCancel;
+            f.ClientSize = new Size(470, y + 40);   // as tall as its rows (was cut off)
+            // a small screen: scroll rather than cut off
+            var wa = Screen.FromControl(this).WorkingArea;
+            if (f.Height > wa.Height - 20) { f.AutoScroll = true; f.Height = wa.Height - 20; }
             Func<Dict> collect = () => new Dict {
                 { "model", cModel.Text.Trim() }, { "divergence", (double)nDiv.Value }, { "convergence", (double)nConv.Value },
                 { "convergence_mode", cCm.Text }, { "ipd_offset", (int)nIpd.Value }, { "synthetic_view", cSyn.Text }, { "method", cMeth.Text },
