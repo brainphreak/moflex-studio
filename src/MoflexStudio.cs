@@ -2486,8 +2486,10 @@ namespace MoflexStudio
         }
 
         // which models to download now: a checklist with sizes (Distill Large ticked)
-        List<string> PickModels(string title, string text, Dict offer, IEnumerable<string> have, bool tickBest)
+        bool pickUseMine;
+        List<string> PickModels(string title, string text, Dict offer, IEnumerable<string> have, bool tickBest, bool offerMine = false)
         {
+            pickUseMine = false;
             var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
                 StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(460, 300), Font = Font };
             f.Controls.Add(new Label { Text = text, Left = 12, Top = 10, Width = 436, Height = 92 });
@@ -2501,10 +2503,17 @@ namespace MoflexStudio
             }
             f.Controls.Add(cl);
             f.Controls.Add(new Label { Text = "Unticked models download by themselves the first time a job uses one.", Left = 12, Top = 232, Width = 436, ForeColor = SystemColors.GrayText });
-            var ok = new Button { Text = "OK", Left = 292, Top = 262, Width = 75, DialogResult = DialogResult.OK };
+            var ok = new Button { Text = offerMine ? "Install" : "OK", Left = 292, Top = 262, Width = 75, DialogResult = DialogResult.OK };
             var cn = new Button { Text = "Cancel", Left = 373, Top = 262, Width = 75, DialogResult = DialogResult.Cancel };
             f.Controls.AddRange(new Control[] { ok, cn }); f.AcceptButton = ok; f.CancelButton = cn;
-            if (f.ShowDialog(this) != DialogResult.OK) return null;
+            if (offerMine)
+            {
+                var mine = new Button { Text = "Use my iw3...", Left = 12, Top = 262, Width = 110, DialogResult = DialogResult.Retry };
+                f.Controls.Add(mine);
+            }
+            var res = f.ShowDialog(this);
+            if (res == DialogResult.Retry) { pickUseMine = true; return null; }
+            if (res != DialogResult.OK) return null;
             return cl.CheckedItems.Cast<Item>().Select(it => (string)it.Tag).ToList();
         }
 
@@ -2516,8 +2525,9 @@ namespace MoflexStudio
             var models = PickModels("Install iw3", "Install iw3 (nunif, MIT licence) for 2D \u2192 3D?\n\n" +
                 "It goes inside Moflex Studio's folder (app\\iw3), with only what Studio uses: its own Python and PyTorch with " +
                 "graphics-card support (about 3 GB), plus the depth models you tick below. An NVIDIA graphics card is strongly " +
-                "recommended.\n\nAlready have iw3 somewhere else? Cancel, then set its folder in Video > Settings....",
-                J.D(J.G(info, "offer")), null, true);
+                "recommended.\n\nAlready have iw3? Use my iw3... uses it as it is, with every model it has (nothing is downloaded).",
+                J.D(J.G(info, "offer")), null, true, true);
+            if (pickUseMine) { await UseMyIw3(); return; }
             if (models == null) return;
             iw3Installing = true; btnIw3Install.Enabled = false; lblIw3.Text = "installing...";
             var args = new List<string> { "iw3-install" };
@@ -2527,6 +2537,25 @@ namespace MoflexStudio
             await RefreshIw3(null);
             if (err != null) { SetStatus("iw3 install failed: " + err); MessageBox.Show(this, err, "iw3 install failed", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             else if (J.B(J.G(iw3Status, "installed"))) SetStatus("iw3 is installed.");
+        }
+
+        // an iw3 the user already has: checked, then remembered (Settings' iw3 folder)
+        async Task UseMyIw3()
+        {
+            string dir = PickFolder(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "iw3"));
+            if (dir == null) return;
+            SetStatus("Checking iw3 in " + dir + "...");
+            Dict r;
+            try { r = J.D(await Backend.Call("iw3-check", dir)); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "iw3"); return; }
+            if (!J.B(J.G(r, "ok"))) { SetStatus(""); MessageBox.Show(this, J.S(J.G(r, "message")), "Not a usable iw3", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            settings["iw3_dir"] = dir; try { SaveSettings(); } catch { }
+            await RefreshIw3(null);
+            var ms = J.A(J.G(r, "models"));
+            MessageBox.Show(this, "Using your iw3:\n" + J.S(J.G(r, "nunif")) + "\n\nPyTorch " + J.S(J.G(r, "torch")) +
+                (J.B(J.G(r, "gpu")) ? " with your graphics card." : " -- it does NOT see a graphics card, so 2D \u2192 3D will be very slow.") +
+                "\n" + ms.Length + " depth model" + (ms.Length == 1 ? "" : "s") + " found.", "iw3", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            SetStatus("Using your iw3.");
         }
 
         // the downloaded depth models: sizes, delete, download more
@@ -2556,8 +2585,21 @@ namespace MoflexStudio
             fill();
             var bDel = new Button { Text = "Delete", Left = 12, Top = 262, Width = 90, Height = 28 };
             var bGet = new Button { Text = "Download...", Left = 108, Top = 262, Width = 100, Height = 28 };
+            var bImp = new Button { Text = "Import...", Left = 214, Top = 262, Width = 90, Height = 28 };
             var bClose = new Button { Text = "Close", Left = 418, Top = 262, Width = 90, Height = 28, DialogResult = DialogResult.Cancel };
-            f.Controls.Add(new Label { Text = "A deleted model downloads again by itself if a job uses it.", Left = 12, Top = 300, Width = 496, ForeColor = SystemColors.GrayText });
+            f.Controls.Add(bImp);
+            bImp.Click += async delegate
+            {
+                string dir = PickFolder(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+                if (dir == null) return;
+                bImp.Enabled = bGet.Enabled = bDel.Enabled = false;
+                string err = await RunEvents("iw3-import-models", dir);
+                bImp.Enabled = bGet.Enabled = bDel.Enabled = true;
+                if (err != null) MessageBox.Show(f, err, "Import", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                try { info = J.D(await Backend.Call("iw3-models")); fill(); } catch { }
+                SetStatus(err == null ? "Models imported (linked, no extra space, where on the same drive)." : "Import failed.");
+            };
+            f.Controls.Add(new Label { Text = "Import: models you already have elsewhere (another iw3, a download folder), linked in without copying where possible. A deleted model downloads again if a job uses it.", Left = 12, Top = 296, Width = 496, Height = 32, ForeColor = SystemColors.GrayText });
             f.Controls.AddRange(new Control[] { lv, bDel, bGet, bClose }); f.CancelButton = bClose;
             bDel.Click += async delegate
             {
