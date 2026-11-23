@@ -1010,8 +1010,24 @@ IW3_DEFAULTS = {
     'scene_detect': False,          # "Scene Boundary Detection"
     'preserve_border': True,        # "Preserve Screen Border"
     'crf': 20,                      # the intermediate SBS video (shrunk to 400x240 later anyway)
+    # the intermediate video's encoding and the processing -- speed and the kept SBS file's quality,
+    # not the depth (so they don't mark a template "(changed)")
+    'preset': 'medium',             # x264 preset: ultrafast .. placebo
+    'tune': '',                     # '', film, animation, grain, stillimage, psnr, fastdecode, zerolatency
+    'pix_fmt': 'yuv420p',
+    'colorspace': 'auto',
+    'hwaccel': '',                  # video decoding on the graphics card: '', cuda, d3d11va, d3d12va, dxva2, amf
+    'batch_size': 2,                # frames per depth batch (ignored with low_vram)
+    'max_workers': 0,               # inference worker threads (0 = off)
+    'fp16': True,                   # half precision (off = --disable-amp)
+    'tta': False,                   # flip augmentation on the depth model (slower, slightly steadier)
+    'low_vram': False,
+    'compile': False,               # torch.compile
+    'cuda_stream': False,
     'keep_sbs': False,              # keep the 3D SBS video beside the output
 }
+IW3_OUTPUT_KEYS = ('crf', 'preset', 'tune', 'pix_fmt', 'colorspace', 'hwaccel', 'batch_size', 'max_workers',
+                   'fp16', 'low_vram', 'compile', 'cuda_stream', 'keep_sbs')
 # Templates: the easy choice. Each is IW3_DEFAULTS with a few changes; the name goes into the file's
 # conv3d= label. The user's own are kept in iw3_templates.json beside this file ({name: {label, ...}}).
 IW3_TEMPLATES = {
@@ -1043,7 +1059,7 @@ def iw3_settings(c):
     base = dict(out)
     out.update({k: v for k, v in c.items() if k in IW3_DEFAULTS})
     out['template'] = c.get('template') or 'best'
-    if any(out[k] != base[k] for k in IW3_DEFAULTS if k not in ('keep_sbs', 'crf')):
+    if any(out[k] != base[k] for k in IW3_DEFAULTS if k not in IW3_OUTPUT_KEYS):
         out['template'] += ' (changed)'      # the file's conv3d= label must not claim the template as is
     return out
 
@@ -1432,15 +1448,32 @@ def iw3_args(c):
         a.append('--scene-detect')
     if c.get('preserve_border'):
         a.append('--preserve-screen-border')
+    if c.get('tta'):
+        a.append('--tta')
     crf = c.get('crf')
     crf = 20 if crf is None or crf == '' else int(crf)     # 0 is a real choice (lossless), not "unset"
-    return a + ['--video-codec', 'libx264', '--crf', str(crf)]
+    a += ['--video-codec', 'libx264', '--crf', str(crf), '--preset', str(c.get('preset') or 'medium'),
+          '--pix-fmt', str(c.get('pix_fmt') or 'yuv420p'), '--colorspace', str(c.get('colorspace') or 'auto')]
+    if c.get('tune'):
+        a += ['--tune', str(c['tune'])]
+    if c.get('hwaccel'):
+        a += ['--hwaccel', str(c['hwaccel'])]
+    if int(c.get('batch_size') or 2) != 2:
+        a += ['--batch-size', str(int(c['batch_size']))]
+    if int(c.get('max_workers') or 0) > 0:
+        a += ['--max-workers', str(int(c['max_workers']))]
+    if c.get('fp16') is False:
+        a.append('--disable-amp')
+    for k, flag in (('low_vram', '--low-vram'), ('compile', '--compile'), ('cuda_stream', '--cuda-stream')):
+        if c.get(k):
+            a.append(flag)
+    return a
 
 def iw3_label(c):
     """how a file was converted, kept in its info (conv3d=): so a lower model is always told apart"""
     ed = c.get('edge_dilation') or [0]
     ed = '/'.join(str(x) for x in (ed if isinstance(ed, list) else [ed]))
-    return (f"iw3 {c.get('template', 'custom')}: {c['model']} d{c['divergence']} c{c['convergence']}"
+    return (f"iw3 {c.get('template', 'custom')}: {c['model']}{' tta' if c.get('tta') else ''} d{c['divergence']} c{c['convergence']}"
             f"{' ' + c['convergence_mode'] if c['convergence_mode'] != 'constant' else ''} {c['method']}"
             f" r{c.get('resolution') or 'def'} e{ed}{' ema' + str(c['ema_decay']) if c.get('ema') else ''}")
 

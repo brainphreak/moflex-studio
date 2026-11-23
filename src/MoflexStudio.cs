@@ -870,7 +870,7 @@ namespace MoflexStudio
                 foreach (var q in queue.Where(x => x.Status.StartsWith("Done")).ToList()) { queue.Remove(q); lvQueue.Items.Remove(q.Lvi); }
                 SaveQueue();
             };
-            btnStart.Click += delegate { StartQueue(); };
+            btnStart.Click += delegate { if (QueueEditorFirst()) StartQueue(); };
             btnStop.Click += delegate { StopQueue(); };
             btnPause.Click += delegate { TogglePause(); };
 
@@ -2339,6 +2339,26 @@ namespace MoflexStudio
             if (!on) { paused = false; btnPause.Text = "Pause"; }
         }
 
+        // Start with a video in the editor: it goes into the queue first (an item being edited is updated
+        // with the changes) -- otherwise Start ran only what was queued, and settings just made in the
+        // editor ("Use for this video" included) silently didn't apply
+        bool QueueEditorFirst()
+        {
+            if (probe == null || queueActive) return true;
+            if (editing != null && queue.Contains(editing) && editing != running)
+            {
+                AddToQueue();                       // updates the queued item
+                return probe == null;               // still loaded = BuildJob refused (its message is shown)
+            }
+            if (editing != null) return true;
+            var r = MessageBox.Show(this, "The video in the editor (" + Path.GetFileName(J.S(J.G(probe, "path"))) + ") isn't in the queue yet.\n\n" +
+                "Add it to the queue and start?\n\nNo: start the queue without it.", "Start",
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (r == DialogResult.Cancel) return false;
+            if (r == DialogResult.Yes) { AddToQueue(); return probe == null; }
+            return true;
+        }
+
         void StartQueue()
         {
             if (queueActive) return;
@@ -2748,7 +2768,38 @@ namespace MoflexStudio
             var nEmaB = (NumericUpDown)row("  EMA buffer (frames)", num(J.G(c, "ema_buffer"), 1, 300, 1, 0));
             var kScene = (CheckBox)row("", new CheckBox { Text = "Scene boundary detection", Width = 220, Checked = J.B(J.G(c, "scene_detect")) });
             var kBorder = (CheckBox)row("", new CheckBox { Text = "Preserve the screen border", Width = 220, Checked = J.B(J.G(c, "preserve_border")) });
-            var nCrf = (NumericUpDown)row("Intermediate quality (CRF)", num(J.G(c, "crf"), 0, 40, 1, 0));
+            // second column: the intermediate video's encoding and the processing (speed; not the depth)
+            int y2 = 10;
+            Func<string, Control, Control> row2 = (label, ctl) =>
+            {
+                f.Controls.Add(new Label { Text = label, Left = 486, Top = y2 + 3, Width = 150 });
+                ctl.Left = 640; ctl.Top = y2; if (ctl.Width < 60) ctl.Width = 140; f.Controls.Add(ctl); y2 += 26; return ctl;
+            };
+            Func<string[], object, ComboBox> pick = (items, v) =>
+            {
+                var cb = new ComboBox { Width = 140, DropDownStyle = ComboBoxStyle.DropDownList };
+                foreach (var it in items) cb.Items.Add(it == "" ? "(none)" : it);
+                string sv = J.S(v); int ix = Array.IndexOf(items, sv); cb.SelectedIndex = ix >= 0 ? ix : 0;
+                return cb;
+            };
+            Func<ComboBox, string> val = cb => cb.SelectedItem == null || cb.SelectedItem.ToString() == "(none)" ? "" : cb.SelectedItem.ToString();
+            f.Controls.Add(new Label { Text = "Output video (the 3D side-by-side file)", Left = 486, Top = y2, Width = 300, Font = new Font(Font, FontStyle.Bold) }); y2 += 22;
+            var nCrf = (NumericUpDown)row2("CRF (quality)", num(J.G(c, "crf"), 0, 51, 1, 0));
+            var cPreset = (ComboBox)row2("Preset", pick(new[] { "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo" }, J.G(c, "preset")));
+            var cTune = (ComboBox)row2("Tune", pick(new[] { "", "film", "animation", "grain", "stillimage", "psnr", "fastdecode", "zerolatency" }, J.G(c, "tune")));
+            var cPix = (ComboBox)row2("Pixel format", pick(new[] { "yuv420p", "yuv444p", "yuv420p10le" }, J.G(c, "pix_fmt")));
+            var cCs = (ComboBox)row2("Colorspace", pick(new[] { "auto", "unspecified", "bt709", "bt709-tv", "bt709-pc", "bt601", "bt601-tv", "bt601-pc", "bt2020-tv", "bt2020-pq-tv" }, J.G(c, "colorspace")));
+            y2 += 8;
+            f.Controls.Add(new Label { Text = "Processing", Left = 486, Top = y2, Width = 300, Font = new Font(Font, FontStyle.Bold) }); y2 += 22;
+            var cHw = (ComboBox)row2("Decode on graphics card", pick(new[] { "", "cuda", "d3d11va", "d3d12va", "dxva2", "amf" }, J.G(c, "hwaccel")));
+            var nBatch = (NumericUpDown)row2("Depth batch size", num(J.G(c, "batch_size"), 1, 64, 1, 0));
+            var cWork = (ComboBox)row2("Worker threads", pick(new[] { "0", "1", "2", "3", "4", "8", "16" }, J.G(c, "max_workers")));
+            var kFp16 = (CheckBox)row2("", new CheckBox { Text = "FP16 (half precision)", Width = 200, Checked = !J.Has(c, "fp16") || J.B(J.G(c, "fp16")) });
+            var kTta = (CheckBox)row2("", new CheckBox { Text = "TTA (flip; slower, steadier)", Width = 200, Checked = J.B(J.G(c, "tta")) });
+            var kLow = (CheckBox)row2("", new CheckBox { Text = "Low VRAM", Width = 200, Checked = J.B(J.G(c, "low_vram")) });
+            var kComp = (CheckBox)row2("", new CheckBox { Text = "torch.compile", Width = 200, Checked = J.B(J.G(c, "compile")) });
+            var kStream = (CheckBox)row2("", new CheckBox { Text = "CUDA stream", Width = 200, Checked = J.B(J.G(c, "cuda_stream")) });
+            foreach (var lb in f.Controls.OfType<Label>().Where(l => l.Left == 486 && l.Text == "")) lb.Width = 0;
             y += 4;
             var bModels = new Button { Text = "Models...", Left = 12, Top = y, Width = 100, Height = 26, Enabled = J.B(J.G(iw3Status, "installed")) };
             f.Controls.Add(new Label { Text = "download or delete depth models (which iw3 is used: Settings tab)", Left = 118, Top = y + 5, Width = 340, ForeColor = SystemColors.GrayText });
@@ -2761,7 +2812,7 @@ namespace MoflexStudio
             var bCancel = new Button { Text = "Cancel", Left = 400, Top = y, Width = 58, Height = 28, DialogResult = DialogResult.Cancel };
             f.Controls.AddRange(new Control[] { bOk, bSave, bDel, bCancel });
             f.AcceptButton = bOk; f.CancelButton = bCancel;
-            f.ClientSize = new Size(470, y + 40);   // as tall as its rows (was cut off)
+            f.ClientSize = new Size(800, Math.Max(y, y2 + 40) + 40);   // as tall as its rows (was cut off)
             // a small screen: scroll rather than cut off
             var wa = Screen.FromControl(this).WorkingArea;
             if (f.Height > wa.Height - 20) { f.AutoScroll = true; f.Height = wa.Height - 20; }
@@ -2771,7 +2822,11 @@ namespace MoflexStudio
                 { "stereo_width", (int)nSw.Value }, { "resolution", (int)nRes.Value }, { "limit_resolution", kLim.Checked },
                 { "foreground_scale", (double)nFg.Value }, { "edge_dilation", new object[] { (int)nEdX.Value, (int)nEdY.Value } },
                 { "ema", kEma.Checked }, { "ema_decay", (double)nEmaD.Value }, { "ema_buffer", (int)nEmaB.Value },
-                { "scene_detect", kScene.Checked }, { "preserve_border", kBorder.Checked }, { "crf", (int)nCrf.Value } };
+                { "scene_detect", kScene.Checked }, { "preserve_border", kBorder.Checked }, { "crf", (int)nCrf.Value },
+                { "preset", val(cPreset) }, { "tune", val(cTune) }, { "pix_fmt", val(cPix) }, { "colorspace", val(cCs) },
+                { "hwaccel", val(cHw) }, { "batch_size", (int)nBatch.Value }, { "max_workers", int.Parse(val(cWork) == "" ? "0" : val(cWork)) },
+                { "fp16", kFp16.Checked }, { "tta", kTta.Checked }, { "low_vram", kLow.Checked }, { "compile", kComp.Checked },
+                { "cuda_stream", kStream.Checked } };
             string saved = null; bool deleted = false;
             bSave.Click += async delegate
             {
