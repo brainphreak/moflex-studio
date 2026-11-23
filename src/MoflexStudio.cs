@@ -2458,39 +2458,129 @@ namespace MoflexStudio
             UpdateVideoNote();
         }
 
-        async Task InstallIw3()
+        // a backend command that prints events (stage/log/error/done), shown in the log and status bar;
+        // returns the error, or null
+        async Task<string> RunEvents(params string[] args)
         {
-            if (iw3Installing) return;
-            if (MessageBox.Show(this, "Install iw3 (nunif, MIT licence) for 2D \u2192 3D?\n\n" +
-                "Its own installer downloads a private Python, PyTorch with graphics-card support and the depth models: several GB, " +
-                "into " + Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Moflex Studio", "iw3") + ".\n\n" +
-                "An NVIDIA graphics card is strongly recommended. It can take a while.\n\n" +
-                "Already have iw3 somewhere else? Cancel, then set its folder in Video > Settings....",
-                "Install iw3", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-            iw3Installing = true; btnIw3Install.Enabled = false; lblIw3.Text = "installing...";
             var tcs = new TaskCompletionSource<bool>();
             string err = null;
-            var p = new Process { StartInfo = Backend.Psi("iw3-install"), EnableRaisingEvents = true };
-            p.OutputDataReceived += (s, e) =>
+            var p = new Process { StartInfo = Backend.Psi(args), EnableRaisingEvents = true };
+            p.OutputDataReceived += (s2, e) =>
             {
                 if (e.Data == null) return;
                 object ev; try { ev = J.Parse(e.Data); } catch { return; }
                 string t = J.S(J.G(ev, "type"));
                 UI(() =>
                 {
-                    if (t == "stage") { SetStatus(J.S(J.G(ev, "text"))); Log(J.S(J.G(ev, "text"))); }
-                    else if (t == "log") { Log("  " + J.S(J.G(ev, "text"))); lblIw3.Text = "installing..."; }
+                    if (t == "stage") { SetStatus(J.S(J.G(ev, "text"))); Log(J.S(J.G(ev, "text"))); lblIw3.Text = "working..."; }
+                    else if (t == "progress") SetStatus(J.S(J.G(ev, "text")) + string.Format(" {0:0}%", J.F(J.G(ev, "pct"))));
+                    else if (t == "log") Log("  " + J.S(J.G(ev, "text")));
                     else if (t == "error") err = J.S(J.G(ev, "message"));
                 });
             };
-            p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) UI(() => Log(e.Data)); };
-            p.Exited += (s, e) => { try { p.WaitForExit(); } catch { } tcs.TrySetResult(true); };
+            p.ErrorDataReceived += (s2, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) UI(() => Log(e.Data)); };
+            p.Exited += (s2, e) => { try { p.WaitForExit(); } catch { } tcs.TrySetResult(true); };
             p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
             await tcs.Task;
+            return err;
+        }
+
+        // which models to download now: a checklist with sizes (Distill Large ticked)
+        List<string> PickModels(string title, string text, Dict offer, IEnumerable<string> have, bool tickBest)
+        {
+            var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(460, 300), Font = Font };
+            f.Controls.Add(new Label { Text = text, Left = 12, Top = 10, Width = 436, Height = 92 });
+            var cl = new CheckedListBox { Left = 12, Top = 106, Width = 436, Height = 120, CheckOnClick = true };
+            foreach (var kv in offer ?? new Dict())
+            {
+                if (have != null && have.Contains(kv.Key)) continue;
+                double mb = J.F(J.G(kv.Value, "mb"));
+                int k = cl.Items.Add(new Item(J.S(J.G(kv.Value, "label")) + "  -  " + (mb >= 1000 ? (mb / 1024).ToString("0.0", J.CI) + " GB" : mb.ToString("0", J.CI) + " MB"), kv.Key));
+                if (tickBest && kv.Key == "Distill_Any_L") cl.SetItemChecked(k, true);
+            }
+            f.Controls.Add(cl);
+            f.Controls.Add(new Label { Text = "Unticked models download by themselves the first time a job uses one.", Left = 12, Top = 232, Width = 436, ForeColor = SystemColors.GrayText });
+            var ok = new Button { Text = "OK", Left = 292, Top = 262, Width = 75, DialogResult = DialogResult.OK };
+            var cn = new Button { Text = "Cancel", Left = 373, Top = 262, Width = 75, DialogResult = DialogResult.Cancel };
+            f.Controls.AddRange(new Control[] { ok, cn }); f.AcceptButton = ok; f.CancelButton = cn;
+            if (f.ShowDialog(this) != DialogResult.OK) return null;
+            return cl.CheckedItems.Cast<Item>().Select(it => (string)it.Tag).ToList();
+        }
+
+        async Task InstallIw3()
+        {
+            if (iw3Installing) return;
+            Dict info = null;
+            try { info = J.D(await Backend.Call("iw3-models")); } catch { }
+            var models = PickModels("Install iw3", "Install iw3 (nunif, MIT licence) for 2D \u2192 3D?\n\n" +
+                "It goes inside Moflex Studio's folder (app\\iw3), with only what Studio uses: its own Python and PyTorch with " +
+                "graphics-card support (about 3 GB), plus the depth models you tick below. An NVIDIA graphics card is strongly " +
+                "recommended.\n\nAlready have iw3 somewhere else? Cancel, then set its folder in Video > Settings....",
+                J.D(J.G(info, "offer")), null, true);
+            if (models == null) return;
+            iw3Installing = true; btnIw3Install.Enabled = false; lblIw3.Text = "installing...";
+            var args = new List<string> { "iw3-install" };
+            if (models.Count == 0) args.Add("none"); else args.AddRange(models);
+            string err = await RunEvents(args.ToArray());
             iw3Installing = false; btnIw3Install.Enabled = true;
             await RefreshIw3(null);
             if (err != null) { SetStatus("iw3 install failed: " + err); MessageBox.Show(this, err, "iw3 install failed", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             else if (J.B(J.G(iw3Status, "installed"))) SetStatus("iw3 is installed.");
+        }
+
+        // the downloaded depth models: sizes, delete, download more
+        async Task ManageModels(IWin32Window owner)
+        {
+            Dict info;
+            try { info = J.D(await Backend.Call("iw3-models")); }
+            catch (Exception ex) { MessageBox.Show(owner, ex.Message); return; }
+            var f = new Form { Text = "2D \u2192 3D depth models", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(520, 330), Font = Font };
+            var lv = new ListView { Left = 12, Top = 12, Width = 496, Height = 240, View = View.Details, FullRowSelect = true, MultiSelect = false };
+            lv.Columns.Add("Model", 380); lv.Columns.Add("Size", 90);
+            Action fill = null;
+            fill = () =>
+            {
+                lv.Items.Clear(); double tot = 0;
+                foreach (var m in J.A(J.G(info, "models")))
+                {
+                    double mb = J.F(J.G(m, "mb")); tot += mb;
+                    if (J.S(J.G(m, "file")).StartsWith("iw3_")) continue;   // iw3's own small ones
+                    var it = lv.Items.Add(J.S(J.G(m, "label")));
+                    it.SubItems.Add(mb >= 1000 ? (mb / 1024).ToString("0.0", J.CI) + " GB" : mb.ToString("0", J.CI) + " MB");
+                    it.Tag = J.S(J.G(m, "file"));
+                }
+                f.Text = "2D \u2192 3D depth models  (" + (tot / 1024).ToString("0.0", J.CI) + " GB)";
+            };
+            fill();
+            var bDel = new Button { Text = "Delete", Left = 12, Top = 262, Width = 90, Height = 28 };
+            var bGet = new Button { Text = "Download...", Left = 108, Top = 262, Width = 100, Height = 28 };
+            var bClose = new Button { Text = "Close", Left = 418, Top = 262, Width = 90, Height = 28, DialogResult = DialogResult.Cancel };
+            f.Controls.Add(new Label { Text = "A deleted model downloads again by itself if a job uses it.", Left = 12, Top = 300, Width = 496, ForeColor = SystemColors.GrayText });
+            f.Controls.AddRange(new Control[] { lv, bDel, bGet, bClose }); f.CancelButton = bClose;
+            bDel.Click += async delegate
+            {
+                if (lv.SelectedItems.Count == 0) return;
+                string file = (string)lv.SelectedItems[0].Tag;
+                if (MessageBox.Show(f, "Delete " + lv.SelectedItems[0].Text + "?", "Delete model", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
+                try { await Backend.Call("iw3-delete-model", file); info = J.D(await Backend.Call("iw3-models")); fill(); }
+                catch (Exception ex) { MessageBox.Show(f, ex.Message); }
+            };
+            bGet.Click += async delegate
+            {
+                var have = J.A(J.G(info, "models")).Select(m => J.S(J.G(m, "model"))).Where(x => x != "").ToList();
+                var pick = PickModels("Download depth models", "Which models should be downloaded now?", J.D(J.G(info, "offer")), have, false);
+                if (pick == null || pick.Count == 0) return;
+                bGet.Enabled = bDel.Enabled = false;
+                var args = new List<string> { "iw3-fetch" }; args.AddRange(pick);
+                string err = await RunEvents(args.ToArray());
+                bGet.Enabled = bDel.Enabled = true;
+                if (err != null) MessageBox.Show(f, err, "Download failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                try { info = J.D(await Backend.Call("iw3-models")); fill(); } catch { }
+                SetStatus(err == null ? "Models downloaded." : "Model download failed.");
+            };
+            f.ShowDialog(owner);
         }
 
         // every iw3 setting: use for this job, save as a template of your own, or delete one of yours
@@ -2546,7 +2636,11 @@ namespace MoflexStudio
             var tDir = new TextBox { Left = 96, Top = y, Width = 324, Text = J.S(J.G(settings, "iw3_dir")) };
             var bDir = new Button { Text = "...", Left = 424, Top = y - 1, Width = 34, Height = 25 };
             bDir.Click += delegate { var pth = PickFolder(tDir.Text); if (pth != null) tDir.Text = pth; };
-            f.Controls.Add(tDir); f.Controls.Add(bDir); y += 34;
+            f.Controls.Add(tDir); f.Controls.Add(bDir); y += 30;
+            var bModels = new Button { Text = "Models...", Left = 96, Top = y, Width = 100, Height = 26, Enabled = J.B(J.G(iw3Status, "installed")) };
+            f.Controls.Add(new Label { Text = "the depth models downloaded, their sizes; delete or download", Left = 202, Top = y + 5, Width = 260, ForeColor = SystemColors.GrayText });
+            bModels.Click += async delegate { await ManageModels(f); };
+            f.Controls.Add(bModels); y += 36;
             var bOk = new Button { Text = "Use for this video", Left = 12, Top = y, Width = 130, Height = 28, DialogResult = DialogResult.OK };
             var bSave = new Button { Text = "Save as template...", Left = 148, Top = y, Width = 130, Height = 28 };
             var bDel = new Button { Text = "Delete template", Left = 284, Top = y, Width = 110, Height = 28,

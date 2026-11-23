@@ -113,6 +113,12 @@ def tools():
     import ass_to_srt
     return msm, mas, ass_to_srt
 
+for _st in (sys.__stdout__, sys.__stderr__):   # UTF-8 always: a pipe or file isn't on Windows by default,
+    try:                                       # and a progress bar's block characters then crash a print
+        _st.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 HUMAN = False   # the 'make' command: plain lines for a person instead of JSON events for the GUI
 
 def emit(_type, **kw):
@@ -830,39 +836,194 @@ def iw3_delete_template(name):
     with open(IW3_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
         json.dump(mine, f, indent=1)
 
-# iw3's own Windows installer (nunif's windows_package): a private Python 3.12 and MinGit, nunif
-# itself, PyTorch with GPU support (most of the download, a few GB) and the models it fetches ahead
-IW3_PKG_RAW = 'https://raw.githubusercontent.com/nagadomi/nunif/master/windows_package/'
-IW3_PKG_FILES = ['install.bat', 'update.bat', 'setenv.bat', 'update-installer.bat', 'iw3-gui.bat', 'nunif-prompt.bat']
+# iw3, installed by Studio itself into app\\iw3 -- all of it inside Studio's folder, and only what
+# Studio uses: a private Python 3.12, nunif's code (no Git), PyTorch with graphics-card support, iw3's
+# packages (not its GUI), and the models the default template needs. iw3's own installer also fetches
+# every depth model and waifu2x's (~11 GB) -- here any other model downloads when a job first uses it.
+IW3_PY_URL = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip'
+IW3_GETPIP_URL = 'https://bootstrap.pypa.io/get-pip.py'
+IW3_SRC_URL = 'https://codeload.github.com/nagadomi/nunif/zip/refs/heads/master'
+IW3_HOME = os.path.join(HERE, 'iw3')
 
-def iw3_install():
-    """iw3 into Studio's own folder (%LOCALAPPDATA%\\Moflex Studio\\iw3), with its progress as events"""
+def _fetch(url, dest, what):
     import urllib.request
-    if not IS_WIN:
-        raise RuntimeError('iw3 is installed this way on Windows only')
-    root = iw3_dirs()[-1]
-    os.makedirs(root, exist_ok=True)
-    emit('stage', stage='iw3-install', index=1, total=3, text='Downloading iw3\'s installer')
-    for f in IW3_PKG_FILES:
-        req = urllib.request.Request(IW3_PKG_RAW + f, headers={'User-Agent': 'moflex-studio'})
-        with urllib.request.urlopen(req, timeout=60) as r, open(os.path.join(root, f), 'wb') as o:
-            o.write(r.read())
-    emit('stage', stage='iw3-install', index=2, total=3,
-         text='Installing iw3: Python, PyTorch (a few GB) and the models -- this takes a while')
-    p = subprocess.Popen(['cmd', '/c', os.path.join(root, 'update.bat')], cwd=root, stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
-    p.stdin.write(b'\r\n' * 4); p.stdin.close()   # the script ends with "pause"
+    req = urllib.request.Request(url, headers={'User-Agent': 'moflex-studio'})
+    with urllib.request.urlopen(req, timeout=120) as r, open(dest, 'wb') as o:
+        total = int(r.headers.get('Content-Length') or 0); done = 0; last = 0
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            o.write(b); done += len(b)
+            if total and time.time() - last > 0.5:
+                last = time.time()
+                emit('progress', stage='iw3-install', pct=round(done / total * 100, 1), text=what)
+
+def _run_logged(cmd, cwd, env, what):
+    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         creationflags=NO_WINDOW)
     tail = []
     for raw in p.stdout:
         line = raw.decode('utf-8', 'replace').strip()
         if line:
-            tail = (tail + [line])[-10:]
+            tail = (tail + [line])[-8:]
             log(line[:300], 'iw3-install')
-    p.wait()
-    r, py = iw3_find()
-    if not r or r != root:
-        raise RuntimeError('iw3\'s installer did not finish: ' + ' | '.join(tail[-4:])[-500:])
-    emit('stage', stage='iw3-install', index=3, total=3, text='iw3 is installed')
+    if p.wait() != 0:
+        raise RuntimeError(f'{what} failed: ' + ' | '.join(tail[-3:])[-500:])
+
+def iw3_env(root):
+    env = dict(os.environ, PYTHONUTF8='1', PIP_NO_CACHE_DIR='1', PIP_DISABLE_PIP_VERSION_CHECK='1',
+               HF_HOME=os.path.join(root, 'cache', 'hf'), XDG_CACHE_HOME=os.path.join(root, 'cache'),
+               TMP=os.path.join(root, 'tmp'), TEMP=os.path.join(root, 'tmp'))
+    env['PATH'] = os.pathsep.join([os.path.join(root, 'python'), os.path.join(root, 'python', 'Scripts'),
+                                   os.path.join(root, 'git', 'cmd'), env.get('PATH', '')])
+    return env
+
+# the depth models worth offering up front, with their download size (MB) and checkpoint file(s)
+IW3_MODEL_FILES = {
+    'Distill_Any_L': (1279, ['distill_any_depth_vitl.safetensors'], 'Distill-Any-Depth Large (Best quality)'),
+    'Distill_Any_B': (372, ['distill_any_depth_vitb.safetensors'], 'Distill-Any-Depth Base (High quality)'),
+    'Distill_Any_S': (95, ['distill_any_depth_vits.safetensors'], 'Distill-Any-Depth Small (Medium / Low quality)'),
+    'VDA_L': (1467, ['video_depth_anything_vitl.pth'], 'Video Depth Anything Large (non-commercial licence)'),
+    'VDA_S': (111, ['video_depth_anything_vits.pth'], 'Video Depth Anything Small'),
+}
+# where they come from: iw3 itself fetches only some (it wants Distill Base/Large placed by hand), so
+# Studio downloads these to the names iw3 looks for
+_HF = 'https://huggingface.co/'
+IW3_MODEL_URLS = {
+    'Distill_Any_L': _HF + 'xingyang1/Distill-Any-Depth/resolve/main/large/model.safetensors',
+    'Distill_Any_B': _HF + 'xingyang1/Distill-Any-Depth/resolve/main/base/model.safetensors',
+    'Distill_Any_S': _HF + 'xingyang1/Distill-Any-Depth/resolve/main/small/model.safetensors',
+    'VDA_L': _HF + 'depth-anything/Video-Depth-Anything-Large/resolve/main/video_depth_anything_vitl.pth',
+    'VDA_S': _HF + 'depth-anything/Video-Depth-Anything-Small/resolve/main/video_depth_anything_vits.pth',
+}
+
+def iw3_ensure_model(m, root=None):
+    """the model's checkpoint where iw3 wants it, downloaded first if it isn't there (with progress)"""
+    if m not in IW3_MODEL_URLS:
+        return            # iw3 fetches the others itself (or says how)
+    root = root or iw3_find()[0]
+    d = os.path.join(root, 'nunif', 'iw3', 'pretrained_models', 'hub', 'checkpoints')
+    dest = os.path.join(d, IW3_MODEL_FILES[m][1][0])
+    if os.path.isfile(dest) and os.path.getsize(dest) > 1 << 20:
+        return
+    os.makedirs(d, exist_ok=True)
+    mb = IW3_MODEL_FILES[m][0]
+    log(f'downloading {m} ({mb} MB)', 'iw3')
+    part = dest + '.part'
+    _fetch(IW3_MODEL_URLS[m], part, f'Downloading {m}')
+    os.replace(part, dest)
+
+def iw3_checkpoints():
+    root, _ = iw3_find()
+    return os.path.join(root, 'nunif', 'iw3', 'pretrained_models', 'hub', 'checkpoints') if root else None
+
+def iw3_models():
+    """the models iw3 has downloaded: [{file, mb, model, label}] (model '' = one of iw3's own small ones)"""
+    d = iw3_checkpoints()
+    out = []
+    if d and os.path.isdir(d):
+        names = {f: (m, lab) for m, (_, fs, lab) in IW3_MODEL_FILES.items() for f in fs}
+        for f in sorted(os.listdir(d)):
+            p = os.path.join(d, f)
+            if os.path.isfile(p):
+                m, lab = names.get(f, ('', ''))
+                out.append({'file': f, 'mb': round(os.path.getsize(p) / 1048576), 'model': m, 'label': lab or f})
+    return out
+
+def iw3_delete_model(fname):
+    d = iw3_checkpoints()
+    if not d or os.path.basename(fname) != fname or not os.path.isfile(os.path.join(d, fname)):
+        raise RuntimeError('no such model file')
+    if fname.startswith('iw3_'):
+        raise RuntimeError("that's one of iw3's own small models (it needs them)")
+    os.remove(os.path.join(d, fname))
+
+def iw3_fetch_models(models, index=1, total=1):
+    """download depth models now, by converting one second of a test picture with each (this also
+    proves iw3 works end to end, and fetches iw3's own small models the first time)"""
+    root, py = iw3_find()
+    if not root:
+        raise RuntimeError("iw3 isn't installed")
+    env = iw3_env(root)
+    tmp = env['TMP']
+    os.makedirs(tmp, exist_ok=True)
+    clip = os.path.join(tmp, 'test.mp4')
+    subprocess.run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+                    'testsrc2=size=640x360:rate=24:duration=1', '-pix_fmt', 'yuv420p', clip],
+                   check=True, creationflags=NO_WINDOW)
+    for m in models:
+        if m not in IW3_MODELS:
+            raise RuntimeError(f'unknown depth model {m}')
+        mb = IW3_MODEL_FILES.get(m, (0,))[0]
+        emit('stage', stage='iw3-install', index=index, total=total,
+             text=f"Downloading {m}" + (f" (about {mb / 1024:.1f} GB)" if mb >= 1000 else f" (about {mb} MB)" if mb else '')
+             + ' and testing iw3')
+        iw3_ensure_model(m, root)
+        c = dict(iw3_settings({'template': 'best'}), model=m)
+        _run_logged([py, '-m', 'iw3.cli', '-i', clip, '-o', os.path.join(tmp, 'test_sbs.mp4'), '--yes']
+                    + iw3_args(c), os.path.join(root, 'nunif'), env, f'Testing iw3 with {m}')
+    shutil.rmtree(tmp, ignore_errors=True)
+
+def iw3_install(models=('Distill_Any_L',)):
+    """iw3 into app\\iw3 (see above), with the chosen models, its progress as events"""
+    import zipfile
+    if not IS_WIN:
+        raise RuntimeError('iw3 is installed this way on Windows only')
+    root = IW3_HOME
+    tmp = os.path.join(root, 'tmp')
+    os.makedirs(tmp, exist_ok=True)
+    env = iw3_env(root)
+    py = os.path.join(root, 'python', 'python.exe')
+    total = 4 + max(1, len(models))
+    # 1. Python 3.12 (embeddable), set up to find nunif and installed packages
+    emit('stage', stage='iw3-install', index=1, total=total, text='Downloading Python 3.12 for iw3')
+    if not os.path.isfile(py) or not os.path.isfile(os.path.join(root, 'python', 'Scripts', 'pip.exe')):
+        shutil.rmtree(os.path.join(root, 'python'), ignore_errors=True)
+        z = os.path.join(tmp, 'python.zip')
+        _fetch(IW3_PY_URL, z, 'Python')
+        with zipfile.ZipFile(z) as zf:
+            zf.extractall(os.path.join(root, 'python'))
+        pth = os.path.join(root, 'python', 'python312._pth')
+        with open(pth, 'a', encoding='utf-8') as f:
+            f.write('\n..\\nunif\nimport site\n')
+        gp = os.path.join(tmp, 'get-pip.py')
+        _fetch(IW3_GETPIP_URL, gp, 'pip')
+        _run_logged([py, gp, '--no-warn-script-location'], root, env, 'Installing pip')
+    # 2. nunif's code (iw3 is part of it), without Git
+    emit('stage', stage='iw3-install', index=2, total=total, text='Downloading iw3 (nunif)')
+    z = os.path.join(tmp, 'nunif.zip')
+    _fetch(IW3_SRC_URL, z, 'iw3')
+    new = os.path.join(root, 'nunif.new')
+    shutil.rmtree(new, ignore_errors=True)
+    with zipfile.ZipFile(z) as zf:
+        top = zf.namelist()[0].split('/')[0]
+        zf.extractall(new)
+    old = os.path.join(root, 'nunif')
+    keep = os.path.join(old, 'iw3', 'pretrained_models')   # an update keeps the models already fetched
+    if os.path.isdir(keep):
+        dst = os.path.join(new, top, 'iw3', 'pretrained_models')
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.move(keep, dst)
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.move(os.path.join(new, top), old)
+    shutil.rmtree(new, ignore_errors=True)
+    # 3. PyTorch with graphics-card support (most of the download), then iw3's packages (not its GUI's)
+    emit('stage', stage='iw3-install', index=3, total=total,
+         text='Installing PyTorch with graphics-card support (about 3 GB) -- this takes a while')
+    _run_logged([py, '-m', 'pip', 'install', '--upgrade', 'pip'], old, env, 'Updating pip')
+    _run_logged([py, '-m', 'pip', 'install', '--upgrade', '-r', os.path.join(old, 'requirements-torch.txt')],
+                old, env, 'Installing PyTorch')
+    emit('stage', stage='iw3-install', index=4, total=total, text="Installing iw3's packages")
+    _run_logged([py, '-m', 'pip', 'install', '--upgrade', '-r', os.path.join(old, 'requirements.txt')],
+                old, env, "Installing iw3's packages")
+    # 4. the chosen depth models (none: each downloads when a job first uses it)
+    shutil.rmtree(tmp, ignore_errors=True)
+    if models:
+        iw3_fetch_models(list(models), 5, total)
+    r, _ = iw3_find()
+    if not r:
+        raise RuntimeError("iw3's install didn't finish")
     emit('done', output=root)
 
 IW3_MODELS = ['Distill_Any_L', 'Distill_Any_B', 'Distill_Any_S', 'VDA_L', 'VDA_B', 'VDA_S',
@@ -875,8 +1036,8 @@ def iw3_dirs():
     if S.get('iw3_dir'):
         out.append(S['iw3_dir'])
     home = os.path.expanduser('~')
-    out += [os.path.join(home, 'Documents', 'iw3'),
-            os.path.join(os.environ.get('LOCALAPPDATA', home), 'Moflex Studio', 'iw3')]
+    out += [IW3_HOME,                                   # Studio's own (Install iw3)
+            os.path.join(home, 'Documents', 'iw3')]     # iw3's own Windows package, if you have it
     return out
 
 def iw3_find():
@@ -927,10 +1088,10 @@ def iw3_convert(job, info, out):
     c = iw3_settings(job.get('conv3d'))
     if c['model'] not in IW3_MODELS:
         raise RuntimeError(f"unknown depth model {c['model']}")
+    iw3_ensure_model(c['model'], root)   # a model not downloaded yet: now, before iw3 asks for it
     cmd = [py, '-m', 'iw3.cli', '-i', job['source'], '-o', out, '--yes', '--max-fps', str(S['max_fps'])] + iw3_args(c)
-    env = dict(os.environ, PYTHONUTF8='1')
-    env['PATH'] = os.pathsep.join([os.path.join(root, 'python'), os.path.join(root, 'python', 'Scripts'),
-                                   os.path.join(root, 'git', 'cmd'), env.get('PATH', '')])
+    env = iw3_env(root)
+    os.makedirs(env['TMP'], exist_ok=True)
     log('iw3: ' + ' '.join(cmd[3:]), 'iw3')
     p = subprocess.Popen(cmd, cwd=os.path.join(root, 'nunif'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          env=env, creationflags=NO_WINDOW)
@@ -1676,8 +1837,14 @@ def main():
             print(json.dumps({'name': iw3_save_template(a[1], json.loads(a[2]))}))
         elif a[0] == 'iw3-delete-template':
             iw3_delete_template(a[1]); print(json.dumps({'ok': True}))
-        elif a[0] == 'iw3-install':          # events, like run
-            iw3_install()
+        elif a[0] == 'iw3-install':          # iw3-install [MODEL ...] (default Distill_Any_L; "none"); events
+            iw3_install([] if a[1:] == ['none'] else a[1:] or ['Distill_Any_L'])
+        elif a[0] == 'iw3-fetch':            # iw3-fetch MODEL ...: download models now; events
+            iw3_fetch_models(a[1:]); emit('done', output='')
+        elif a[0] == 'iw3-models':           # the downloaded models, with sizes
+            print(json.dumps({'models': iw3_models(), 'offer': {m: {'mb': v[0], 'label': v[2]} for m, v in IW3_MODEL_FILES.items()}}, indent=1))
+        elif a[0] == 'iw3-delete-model':
+            iw3_delete_model(a[1]); print(json.dumps({'ok': True}))
         elif a[0] == 'iw3-status':    # for the 2D to 3D panel: is iw3 here, and what it offers
             root, py = iw3_find()
             print(json.dumps({'installed': bool(root), 'dir': root or '', 'looked': iw3_dirs(),

@@ -7,3 +7,5 @@ app/queue.json
 __pycache__/
 *.pyc
 .DS_Store
+app/iw3/
+app/iw3_templates.json
