@@ -459,7 +459,7 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "1.8";
+        const string AppVersion = "1.9";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
