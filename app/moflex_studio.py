@@ -1656,7 +1656,81 @@ def make_open_moflex(job, info, layout, work, src=None, stage='moflex'):
                 os.environ[k2] = v2
     if not os.path.isfile(out) or os.path.getsize(out) == 0:
         raise RuntimeError('the open encoder finished without producing a moflex')
+    if is3d:
+        log(f'paired the eyes\' timestamps: {pair_3d_timestamps(out)} pictures', stage)
     return out
+
+def pair_3d_timestamps(path):
+    """a 3D moflex's eyes as pairs: each right picture gets its left picture's timestamp, as the
+    official encoder writes them (L,R share one). The open encoder stamps every picture on its own at
+    twice the frame rate, and players pair the eyes by timestamp -- so one eye showed a frame off.
+    Done in place, bit for bit (the same width); returns the number of pictures changed."""
+    def rvarb(d, i):
+        v = d[i]; i += 1
+        if not (v & 0x80): return v, i
+        val = (v & 0x7f) << 7; v = d[i]; i += 1
+        if not (v & 0x80): return val | v, i
+        val = (((v & 0x7f) | val) << 7); v = d[i]; i += 1
+        if not (v & 0x80): return val | v, i
+        val = (((v & 0x7f) | val) << 7) | d[i]; i += 1
+        return val, i
+    class BR:
+        def __init__(s_, d, byte): s_.d = d; s_.start = byte; s_.bp = 0
+        def pop(s_):
+            b = s_.d[s_.start + (s_.bp >> 3)]; bit = (b >> (7 - (s_.bp & 7))) & 1; s_.bp += 1; return bit
+        def popn(s_, n):
+            v = 0
+            for _ in range(n): v = (v << 1) | s_.pop()
+            return v
+        def poplen(s_):
+            n = 1
+            while s_.pop() == 0: n += 1
+            return n
+        def after(s_): return s_.start + ((s_.bp + 7) >> 3)
+    d = bytearray(open(path, 'rb').read())
+    n = len(d); pos = 0; size = None; vidx = None; fc = 0; even = None; patches = []
+    while pos + 2 <= n:
+        if d[pos] == 0x4C and d[pos + 1] == 0x32:
+            size = int.from_bytes(d[pos + 12:pos + 14], 'big') + 1
+            i = pos + 14
+            while True:
+                typ, i = rvarb(d, i); _, i = rvarb(d, i)
+                if typ == 0: break
+                if typ in (1, 3):
+                    if vidx is None: vidx = d[i]
+                    i += 10 + (3 if typ == 3 else 2)
+                elif typ == 2: i += 6
+                elif typ == 4: i += 2
+                else: raise RuntimeError('unexpected moflex stream header')
+            flags = d[i]; i += 1
+        else:
+            flags = d[pos]; i = pos + 1
+        if flags & 2: i += 2
+        if size is None: raise RuntimeError('not a moflex')
+        ci, end = i, pos + size
+        if end > n: break
+        while ci < end and d[ci] != 0:
+            br = BR(d, ci)
+            si = br.popn(br.poplen()); endframe = br.pop(); ef = None
+            if endframe:
+                br.popn(br.poplen()); br.pop(); b2 = br.poplen()
+                ef = (ci * 8 + br.bp, b2 * 2 + 26); ef = ef + (br.popn(ef[1]),)
+            pkt = br.popn(13) + 1
+            ci = br.after() + pkt
+            if endframe and si == vidx:
+                if fc % 2 == 0: even = ef[2]
+                elif ef[2] != even and even < (1 << ef[1]): patches.append((ef[0], ef[1], even))
+                fc += 1
+        pos += size
+    for bit, w, val in patches:
+        for k in range(w):
+            b = (val >> (w - 1 - k)) & 1
+            bi, sh = (bit + k) >> 3, 7 - ((bit + k) & 7)
+            d[bi] = (d[bi] & ~(1 << sh)) | (b << sh)
+    if patches:
+        with open(path, 'wb') as f:
+            f.write(d)
+    return len(patches)
 
 def use_open(job):
     return (job.get('encoder') or S.get('encoder') or 'mobiclip') == 'open'
@@ -2350,6 +2424,8 @@ def main():
             iw3_install([] if a[1:] == ['none'] else a[1:] or ['Distill_Any_L'])
         elif a[0] == 'iw3-fetch':            # iw3-fetch MODEL ...: download models now; events
             iw3_fetch_models(a[1:]); emit('done', output='')
+        elif a[0] == 'pair-3d':              # pair-3d FILE.moflex: fix an open-encoder 3D file's eye pairing
+            print(json.dumps({'changed': pair_3d_timestamps(a[1])}))
         elif a[0] == 'iw3-check':            # iw3-check DIR: a usable iw3 there?
             print(json.dumps(iw3_check(a[1]), indent=1))
         elif a[0] == 'iw3-import-models':    # iw3-import-models DIR: link/copy models found there; events
