@@ -459,13 +459,16 @@ namespace MoflexStudio
     class MainForm : Form
     {
         static readonly string[] VideoExt = { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mts", ".webm", ".wmv", ".mpg", ".mpeg", ".flv", ".moflex" };
-        const string AppVersion = "2.1";
+        const string AppVersion = "2.2";
         // the staff-only update channel: the full bundle, unlinked on clownsec.com (latest.txt = version, md5 of the zip)
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
         const string FfUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
         // the open moflex encoder (Mobipeg-MOFLEX + clownsec patches, GPL-2.0; source: github.com/brainphreak/clownsec-moflex-encoder)
         const string OpenEncUrl = "https://www.clownsec.com/studio/tools/moflex-ffmpeg-windows-x64.zip";
+        // its version: a copy older than this (no or another moflex-ffmpeg.version beside it) is replaced
+        // 2 = 3D pairs share a timestamp, seek points only on a left picture (eyes a frame apart after a seek)
+        const string OpenEncVer = "2";
 
         string appDir, settingsPath, queuePath;
         Dict settings = new Dict();
@@ -968,6 +971,7 @@ namespace MoflexStudio
         }
 
         string EncoderChoice() { var it = cmbEncoder == null ? null : cmbEncoder.SelectedItem as Item; return it == null ? "mobiclip" : (string)it.Tag; }
+        string OpenEncVersion() { try { return File.ReadAllText(OpenEncPath() + ".version").Trim(); } catch { return ""; } }
         string OpenEncPath() { return Path.Combine(ToolPath("ffmpeg_dir", Path.Combine(appDir, "bin")), "moflex-ffmpeg.exe"); }
 
         // where a new job's output goes: the last folder used (if remembered), else the default from Settings
@@ -1014,9 +1018,10 @@ namespace MoflexStudio
             string bin = ToolPath("ffmpeg_dir", Path.Combine(appDir, "bin"));
             bool py = File.Exists(Backend.Python);
             bool ff = File.Exists(Path.Combine(bin, "ffmpeg.exe")) && File.Exists(Path.Combine(bin, "ffprobe.exe"));
-            bool oe = File.Exists(OpenEncPath());
+            bool oeAny = File.Exists(OpenEncPath());
+            bool oe = oeAny && OpenEncVersion() == OpenEncVer;   // an older one counts as missing: it's replaced
             bool wantOe = EncoderChoice() == "open" || downloadAll;
-            if (download && (!py || !ff || (!oe && wantOe)))
+            if (download && (!py || !ff || (!oe && (wantOe || oeAny))))
             {
                 btnDownload.Enabled = false;
                 try
@@ -1025,7 +1030,11 @@ namespace MoflexStudio
                     catch { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; }
                     if (!py) { await Fetch(PyUrl, "Python 3.11 (embeddable)", Path.Combine(appDir, "python"), null); }
                     if (!ff) { await Fetch(FfUrl, "ffmpeg (gyan.dev release essentials)", Path.Combine(appDir, "bin"), new[] { "ffmpeg.exe", "ffprobe.exe" }); }
-                    if (!oe && wantOe) { await Fetch(OpenEncUrl, "the open moflex encoder", Path.GetDirectoryName(OpenEncPath()), new[] { "moflex-ffmpeg.exe" }); }
+                    if (!oe && (wantOe || oeAny))
+                    {
+                        await Fetch(OpenEncUrl, oeAny ? "the open moflex encoder (update)" : "the open moflex encoder", Path.GetDirectoryName(OpenEncPath()), new[] { "moflex-ffmpeg.exe" });
+                        File.WriteAllText(OpenEncPath() + ".version", OpenEncVer);
+                    }
                     SetStatus("Tools downloaded.");
                 }
                 catch (Exception ex) { SetStatus("Download failed: " + ex.Message + "  (Settings > Download missing tools to retry)"); }
@@ -1043,7 +1052,8 @@ namespace MoflexStudio
                 ok(py), rel(Backend.Python), ok(ff), rel(bin),
                 ok(mc), mc ? rel(Path.GetDirectoryName(enc)) + "  (+ RunAsDate, licence)"
                     : (File.Exists(enc) ? "" : "encoder ") + (File.Exists(rad) ? "" : "RunAsDate ") + (File.Exists(lic) ? "" : "licence ") + "missing",
-                oe ? "OK     " : "-      ", oe ? rel(OpenEncPath()) : "not installed (optional: Download missing tools)");
+                oe ? "OK     " : "-      ", oe ? rel(OpenEncPath())
+                    : oeAny ? "an older version: Download missing tools updates it" : "not installed (optional: Download missing tools)");
             toolsNote = mc || oe ? "" : "No moflex encoder: video files can't be converted (moflex editing still works). Download missing tools gets the open one.";
             UpdateToolsLabel();
             toolsReady = py && ff;
