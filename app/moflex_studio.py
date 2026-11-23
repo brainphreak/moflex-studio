@@ -882,12 +882,18 @@ def iw3_env(py):
     return env
 
 # the depth models worth offering up front, with their download size (MB) and checkpoint file(s)
+# THE list of depth models Studio offers -- in Settings' model choice, Models... > Download and the
+# install alike -- in this order; each one Studio can download itself
 IW3_MODEL_FILES = {
     'Distill_Any_L': (1279, ['distill_any_depth_vitl.safetensors'], 'Distill-Any-Depth Large (Best quality)'),
     'Distill_Any_B': (372, ['distill_any_depth_vitb.safetensors'], 'Distill-Any-Depth Base (High quality)'),
     'Distill_Any_S': (95, ['distill_any_depth_vits.safetensors'], 'Distill-Any-Depth Small (Medium / Low quality)'),
-    'VDA_L': (1467, ['video_depth_anything_vitl.pth'], 'Video Depth Anything Large (non-commercial licence)'),
+    'VDA_L': (1467, ['video_depth_anything_vitl.pth'], 'Video Depth Anything Large (non-commercial)'),
+    'VDA_B': (437, ['video_depth_anything_vitb.pth'], 'Video Depth Anything Base (non-commercial)'),
     'VDA_S': (111, ['video_depth_anything_vits.pth'], 'Video Depth Anything Small'),
+    'Any_V2_L': (1279, ['depth_anything_v2_vitl.pth'], 'Depth Anything V2 Large (non-commercial)'),
+    'Any_V2_B': (372, ['depth_anything_v2_vitb.pth'], 'Depth Anything V2 Base (non-commercial)'),
+    'Any_V2_S': (95, ['depth_anything_v2_vits.pth'], 'Depth Anything V2 Small'),
 }
 # where they come from: iw3 itself fetches only some (it wants Distill Base/Large placed by hand), so
 # Studio downloads these to the names iw3 looks for
@@ -897,8 +903,18 @@ IW3_MODEL_URLS = {
     'Distill_Any_B': _HF + 'xingyang1/Distill-Any-Depth/resolve/main/base/model.safetensors',
     'Distill_Any_S': _HF + 'xingyang1/Distill-Any-Depth/resolve/main/small/model.safetensors',
     'VDA_L': _HF + 'depth-anything/Video-Depth-Anything-Large/resolve/main/video_depth_anything_vitl.pth',
+    'VDA_B': _HF + 'depth-anything/Video-Depth-Anything-Base/resolve/main/video_depth_anything_vitb.pth',
     'VDA_S': _HF + 'depth-anything/Video-Depth-Anything-Small/resolve/main/video_depth_anything_vits.pth',
+    'Any_V2_L': _HF + 'depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth',
+    'Any_V2_B': _HF + 'depth-anything/Depth-Anything-V2-Base/resolve/main/depth_anything_v2_vitb.pth',
+    'Any_V2_S': _HF + 'depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth',
 }
+
+def iw3_catalog():
+    """the offered models, in order, each with whether it's downloaded: [{model, label, mb, have}]"""
+    have = {m['file'] for m in iw3_models()} if iw3_find()[0] else set()
+    return [{'model': m, 'label': lab, 'mb': mb, 'have': any(f in have for f in fs)}
+            for m, (mb, fs, lab) in IW3_MODEL_FILES.items()]
 
 def iw3_ensure_model(m, nunif=None):
     """the model's checkpoint where iw3 wants it, downloaded first if it isn't there (with progress)"""
@@ -1958,7 +1974,8 @@ def main():
         elif a[0] == 'iw3-status':    # for the 2D to 3D panel: is iw3 here, and what it offers
             root, py = iw3_find()
             print(json.dumps({'installed': bool(root), 'dir': root or '', 'looked': iw3_dirs(),
-                              'models': IW3_MODELS, 'defaults': IW3_DEFAULTS, 'templates': iw3_templates()}, indent=1))
+                              'models': IW3_MODELS, 'catalog': iw3_catalog(),
+                              'defaults': IW3_DEFAULTS, 'templates': iw3_templates()}, indent=1))
         else:
             print(__doc__); sys.exit(1)
     except SystemExit:

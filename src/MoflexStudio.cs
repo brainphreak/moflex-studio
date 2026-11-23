@@ -2642,9 +2642,18 @@ namespace MoflexStudio
             Func<object, decimal, decimal, decimal, int, NumericUpDown> num = (v, min, max, inc, dec) =>
                 new NumericUpDown { Minimum = min, Maximum = max, Increment = inc, DecimalPlaces = dec, Width = 90,
                     Value = Math.Max(min, Math.Min(max, (decimal)J.F(v))) };
-            var cModel = new ComboBox { Width = 160, DropDownStyle = ComboBoxStyle.DropDown };
-            foreach (var m in J.A(J.G(iw3Status, "models"))) cModel.Items.Add(J.S(m));
-            cModel.Text = J.S(J.G(c, "model"));
+            // the same models Models... offers, each with its size and whether it's downloaded
+            var cModel = new ComboBox { Width = 270, DropDownStyle = ComboBoxStyle.DropDownList, DropDownWidth = 400 };
+            string curModel = J.S(J.G(c, "model"));
+            foreach (var m in J.A(J.G(iw3Status, "catalog")))
+            {
+                double mb = J.F(J.G(m, "mb"));
+                string size = mb >= 1000 ? (mb / 1024).ToString("0.0", J.CI) + " GB" : mb.ToString("0", J.CI) + " MB";
+                cModel.Items.Add(new Item(J.S(J.G(m, "label")) + "  -  " + (J.B(J.G(m, "have")) ? "downloaded" : size + ", downloads when used"),
+                    J.S(J.G(m, "model"))));
+            }
+            if (curModel != "" && !cModel.Items.Cast<Item>().Any(it => (string)it.Tag == curModel)) cModel.Items.Add(new Item(curModel, curModel));
+            SelectItem(cModel, curModel); if (cModel.SelectedIndex < 0 && cModel.Items.Count > 0) cModel.SelectedIndex = 0;
             row("Depth model", cModel);
             var nDiv = (NumericUpDown)row("3D strength", num(J.G(c, "divergence"), 0, 10, 0.1m, 2));
             var nConv = (NumericUpDown)row("Convergence plane", num(J.G(c, "convergence"), -2, 2, 0.05m, 2));
@@ -2695,7 +2704,7 @@ namespace MoflexStudio
             var wa = Screen.FromControl(this).WorkingArea;
             if (f.Height > wa.Height - 20) { f.AutoScroll = true; f.Height = wa.Height - 20; }
             Func<Dict> collect = () => new Dict {
-                { "model", cModel.Text.Trim() }, { "divergence", (double)nDiv.Value }, { "convergence", (double)nConv.Value },
+                { "model", cModel.SelectedItem is Item ? (string)((Item)cModel.SelectedItem).Tag : curModel }, { "divergence", (double)nDiv.Value }, { "convergence", (double)nConv.Value },
                 { "convergence_mode", cCm.Text }, { "ipd_offset", (int)nIpd.Value }, { "synthetic_view", cSyn.Text }, { "method", cMeth.Text },
                 { "stereo_width", (int)nSw.Value }, { "resolution", (int)nRes.Value }, { "limit_resolution", kLim.Checked },
                 { "foreground_scale", (double)nFg.Value }, { "edge_dilation", new object[] { (int)nEdX.Value, (int)nEdY.Value } },
