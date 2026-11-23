@@ -38,7 +38,7 @@ Special thanks to lenn3 for discovering that raw AVI without audio prevents the 
    - **ffmpeg** (about 110 MB) from gyan.dev, into `app\bin`
 
    When the status bar says **Ready**, you're set. If a download fails, go to **Settings → Download missing tools** to retry.
-5. *(Optional)* Paste your **TMDB token** into **Settings** and click **Save settings**. It's only needed for the *Search TMDB* button.
+5. *(Optional)* Paste your own **TMDB token** into **Settings** and click **Save settings**. Without one, *Search TMDB* goes through clownsec.com.
 
 Requirements: Windows 10 or 11, 64-bit. It uses the .NET Framework 4.8 that Windows already includes. Free disk space: the temporary lossless AVI is about **8–9 GB for a 90-minute movie**. It goes in your `%TEMP%` folder and is deleted automatically.
 
@@ -90,8 +90,25 @@ Shows what was detected:
 | **Source layout** | **Auto** (detected), **2D**, **Half SBS** (each eye squeezed to half width) or **Full SBS** (each eye full width). Auto uses the shape of the picture and words like "SBS" in the file name. Set it yourself if Auto guesses wrong. |
 | **Output** | **3D** (two 400x240 eyes) or **2D** (one 400x240 picture). 2D output from an SBS source uses the left eye. For a moflex input, this only sets the 3D flag the player reads. |
 | **Bitrate** | video bitrate in kbps. 1400 is the default (the official 3D setting). |
+| **2D → 3D (iw3)** | makes a **2D** source 3D (see below). Pick a **template**; **Settings...** shows every setting. **Keep the 3D side-by-side video** saves iw3's full SBS file beside the output (it's deleted otherwise). |
 
 The picture is always **letterboxed, never stretched**, so the aspect ratio is kept. Sources above 30 fps are halved (60 → 30).
+
+#### 2D to 3D
+
+With **2D → 3D (iw3)** ticked, a 2D film becomes a real 3D moflex. [iw3](https://github.com/nagadomi/nunif) (MIT) estimates the depth of every frame of the **full-size** picture with an AI depth model on your graphics card and draws the two eyes. The result is then encoded like any full side-by-side source. Audio and subtitles still come from the original file.
+
+| Template | Model | For |
+|---|---|---|
+| **Best quality (top graphics card)** | Distill-Any-Depth Large | the default; the settings tuned by hand for the 3DS |
+| **High quality** | Distill-Any-Depth Base | |
+| **Medium quality** | Distill-Any-Depth Small | |
+| **Low quality (low-end graphics card)** | Distill-Any-Depth Small, lighter depth and warp | |
+
+- **Settings...** shows every iw3 setting (model, 3D strength, convergence, method, edge fix, flicker reduction...). **Use for this video** changes them for this video only; **Save as template...** keeps them as a template of your own (in `app\iw3_templates.json`), listed with the others. Any model iw3 knows can be typed in, e.g. `VDA_L` (Video Depth Anything).
+- **Every converted file says how it was made**: its info gets a line like `conv3d=iw3 best: Distill_Any_L d1.7 c0.65 sod_v1 mlbw_l2s r512 e3/1 ema0.99`. A template you changed shows as `best (changed)`, so a file made with a smaller model is always told apart.
+- **Install iw3...** appears when Studio can't find iw3. It runs iw3's own Windows installer into `%LOCALAPPDATA%\Moflex Studio\iw3`: a private Python, PyTorch with graphics-card support and the models, **several GB**. An existing install in `Documents\iw3` is found by itself; one elsewhere can be set in **Settings...** (iw3 folder).
+- **It's slow**: an RTX 4090 does about 0.6x real time with Best (a 1-minute 1080p clip took 2:34 in all; 1:20 with Low), so a 2-hour film takes roughly 3 hours. An NVIDIA card is strongly recommended.
 
 **Versions of the film** (up to 4 in all, e.g. a colour and a black-and-white master):
 - The list starts with **this file's video**. **Row 1 is the main version** (marked *main*): the file's normal video, what every player shows, including the official viewer. The other rows are for the CLOWNSEC player, which switches between them with **VIDEO > Version**.
@@ -254,7 +271,7 @@ Editing an existing moflex takes a few seconds. Each new audio track takes about
 | "3D output needs a side-by-side source" | The file looks 2D. Set **Video → Source layout** to HSBS or FSBS, or choose 2D output. |
 | A subtitle stream shows "(image: needs OCR)" | It's PGS/VobSub. Convert it to `.srt` with an OCR tool and add the file instead. |
 | "subtitle N is ... bytes, over 1 MiB" | Split or clean the subtitle file. The player won't load a track over 1 MB. |
-| Search TMDB says "no TMDB token set" | Paste your token in **Settings** and click **Save settings**. |
+| Search TMDB finds the wrong film | Search by its IMDb id (`tt0109040`, or paste the imdb.com link). |
 | Something odd happened | Check `app\error.log`. The app logs unexpected errors there instead of closing, and the log box under the queue shows the details of each job. |
 | SmartScreen blocks the exe | **More info → Run anyway**. Or right-click the zip → Properties → **Unblock** before unzipping. |
 | "The output would be about N GB, over the 4 GB..." | A 3DS SD card is FAT32 and can't hold a 4 GB file. Lower the bitrate, or drop audio tracks or video versions. |
@@ -272,15 +289,42 @@ Editing an existing moflex takes a few seconds. Each new audio track takes about
 - One file loads into the editor. Several files or a folder go into the queue.
 - `--queue` queues even a single file. `--start` starts the queue right away.
 
-The backend can also be used on its own:
+### Without the window: `moflex-studio make`
+
+`moflex-studio.cmd` (in the Studio folder) does a whole job from a Command Prompt, with plain progress lines:
 
 ```
-app\python\python.exe app\moflex_studio.py probe <file>
-app\python\python.exe app\moflex_studio.py run <job.json>      (one JSON event per line)
-app\python\python.exe app\moflex_studio.py tmdb-search movie "Title" [year]
+moflex-studio make "Ace Ventura (1994).mkv" --conv3d
+moflex-studio make "Ace Ventura (1994).mkv" --conv3d low --out D:\3DS
+moflex-studio make "Avatar (2009) Half SBS.mkv" --3d --source-type hsbs --tmdb
+moflex-studio make --templates
+moflex-studio make --help
 ```
 
-The job format is documented at the top of `app\moflex_studio.py`.
+| Option | Meaning |
+|---|---|
+| `--3d` / `--2d` | what to encode (default: 3D for a 3D source or with `--conv3d`, else 2D) |
+| `--source-type T` | `auto` (default), `2d`, `hsbs`, `fsbs` |
+| `--conv3d [TEMPLATE]` | 2D to 3D with iw3 first: `best` (default), `high`, `medium`, `low`, or one of yours |
+| `--keep-sbs` | keep iw3's side-by-side video |
+| `--title`, `--year`, `--category`, `--genres`, `--desc` | the info (default: from the file name) |
+| `--tmdb` | look up the info and poster on TMDB (no token needed) |
+| `--poster FILE\|URL`, `--bitrate KBPS`, `--out DIR`, `--name NAME` | |
+| `--plain` | a plain moflex (no SUPER MOFLEX trailer) |
+| `--json` | JSON events instead of plain lines |
+
+It uses Studio's own Python and ffmpeg, so run the window once first to download them. Add the Studio folder to your PATH to type `moflex-studio` from anywhere.
+
+### The backend
+
+```
+moflex-studio probe <file>
+moflex-studio run <job.json>                 (one JSON event per line, what the window reads)
+moflex-studio tmdb-search movie "Title" [year]    (an IMDb id like tt0109040 works too)
+moflex-studio iw3-status
+```
+
+The job format is documented at the top of `app\moflex_studio.py` (2D to 3D: `"conv3d": {"enabled": true, "template": "best", "keep_sbs": false}`, plus any iw3 setting to change).
 
 ---
 

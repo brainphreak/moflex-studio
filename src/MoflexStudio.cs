@@ -483,6 +483,8 @@ namespace MoflexStudio
         TextBox txtSource; Label lblInfo; Button btnOpen;
         TabControl tabs;
         ComboBox cmbLayout; RadioButton rad3D, rad2D; NumericUpDown numBitrate; Label lblVideoNote;
+        CheckBox chkConv3d, chkKeepSbs; ComboBox cmbTpl; Button btnTplEdit, btnIw3Install; Label lblIw3;
+        Dict iw3Status; Dict conv3dOver = new Dict(); bool iw3Installing;
         AudioPicker audio1, audio2;           // audio2 = the editor for one extra track (2..8)
         ListView lvAud; Label lblAudCount;
         ListView lvVer; TextBox txtVerLabel; ComboBox cmbVerLayout, cmbVerAudio;
@@ -530,6 +532,7 @@ namespace MoflexStudio
                 CleanStaleWork();
                 try { string ud = Path.Combine(appDir, "update"); if (Directory.Exists(ud)) Directory.Delete(ud, true); } catch { }   // a finished update's leftovers
                 await CheckTools(true);
+                await RefreshIw3(null);
                 await CheckUpdate(false);         // quiet: a status-bar note when there is a newer build
                 // files dropped on the exe: one -> editor, several -> queue; --queue forces queueing, --start runs the queue
                 var args = Environment.GetCommandLineArgs().Skip(1).ToList();
@@ -582,7 +585,17 @@ namespace MoflexStudio
             L(tVideo, "Bitrate", 10, 78, 100);
             numBitrate = Add(tVideo, new NumericUpDown { Left = 112, Top = 78, Width = 80, Minimum = 200, Maximum = 8000, Increment = 100, Value = 1400 });
             L(tVideo, "kbps", 196, 78, 40);
-            lblVideoNote = Note(tVideo, "", 10, 110, 576, 104);
+            chkConv3d = Add(tVideo, new CheckBox { Text = "2D \u2192 3D (iw3)", Left = 10, Top = 110, Width = 140 });
+            cmbTpl = Add(tVideo, new ComboBox { Left = 152, Top = 108, Width = 272, DropDownStyle = ComboBoxStyle.DropDownList });
+            btnTplEdit = Add(tVideo, new Button { Text = "Settings...", Left = 430, Top = 107, Width = 80, Height = 25 });
+            chkKeepSbs = Add(tVideo, new CheckBox { Text = "Keep the 3D side-by-side video", Left = 152, Top = 136, Width = 210 });
+            lblIw3 = Note(tVideo, "", 366, 139, 136, 18);
+            btnIw3Install = Add(tVideo, new Button { Text = "Install iw3...", Left = 506, Top = 134, Width = 82, Height = 25, Visible = false });
+            lblVideoNote = Note(tVideo, "", 10, 164, 576, 50);
+            chkConv3d.CheckedChanged += delegate { if (chkConv3d.Checked) rad3D.Checked = true; UpdateVideoNote(); UpdateAutoName(); };
+            cmbTpl.SelectedIndexChanged += delegate { conv3dOver.Clear(); UpdateVideoNote(); };
+            btnTplEdit.Click += delegate { EditIw3Settings(); };
+            btnIw3Install.Click += async delegate { await InstallIw3(); };
             var grpVer = Add(tVideo, new GroupBox { Text = "Other versions of the film  (CLOWNSEC player: VIDEO > Version)", Left = 8, Top = 216, Width = 580, Height = 196 });
             lvVer = new ListView { Left = 8, Top = 20, Width = 460, Height = 100, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
             lvVer.Columns.Add("#", 44); lvVer.Columns.Add("Name", 62); lvVer.Columns.Add("From", 246); lvVer.Columns.Add("Audio", 104);
@@ -766,7 +779,7 @@ namespace MoflexStudio
             txtToken = Add(tSet, new TextBox { Left = 108, Top = 14, Width = 400, UseSystemPasswordChar = true });
             var chkShow = Add(tSet, new CheckBox { Text = "Show", Left = 516, Top = 15, Width = 70 });
             chkShow.CheckedChanged += delegate { txtToken.UseSystemPasswordChar = !chkShow.Checked; };
-            Note(tSet, "The API Read Access Token from themoviedb.org (Settings > API). Only needed for the Search TMDB button.", 108, 40, 478, 32);
+            Note(tSet, "The API Read Access Token from themoviedb.org (Settings > API). Optional: without one, searches go through clownsec.com.", 108, 40, 478, 32);
             L(tSet, "Bitrate", 10, 80, 96);
             numDefBitrate = Add(tSet, new NumericUpDown { Left = 108, Top = 80, Width = 80, Minimum = 200, Maximum = 8000, Increment = 100, Value = 1400 });
             L(tSet, "kbps default", 192, 80, 100);
@@ -1362,6 +1375,15 @@ namespace MoflexStudio
             else { cmbLayout.Items.Add(new Item("moflex (video is not re-encoded)", "auto")); cmbLayout.SelectedIndex = 0; }
             cmbLayout.Enabled = numBitrate.Enabled = kind == "video";
             rad3D.Checked = J.S(J.G(job, "output")) != "2d"; rad2D.Checked = !rad3D.Checked;
+            {
+                var cv = J.D(J.G(job, "conv3d"));
+                SelectItem(cmbTpl, cv != null && J.S(J.G(cv, "template")) != "" ? J.S(J.G(cv, "template")) : "best");
+                conv3dOver = new Dict();
+                if (cv != null) foreach (var kv in cv) if (kv.Key != "enabled" && kv.Key != "template" && kv.Key != "keep_sbs") conv3dOver[kv.Key] = kv.Value;
+                chkConv3d.Checked = cv != null && J.B(J.G(cv, "enabled"));
+                chkKeepSbs.Checked = cv != null && J.B(J.G(cv, "keep_sbs"));
+                chkConv3d.Enabled = kind == "video";
+            }
             int br = J.I(J.G(job, "bitrate")); numBitrate.Value = br >= 200 ? Math.Min(8000, br) : numDefBitrate.Value;
 
             // audio
@@ -1477,7 +1499,10 @@ namespace MoflexStudio
             if (lay == "auto") lay = J.S(J.G(J.G(probe, "video"), "detected"));
             string s = "Each eye is scaled into 400x240 and letterboxed (black bars), never stretched; the aspect ratio is kept. " +
                 "Sources above 30 fps are halved.\n\n";
-            if (rad3D.Checked && lay == "2d") s += "3D output needs a side-by-side source. Set the layout to HSBS or FSBS, or choose 2D output.";
+            if (rad3D.Checked && lay == "2d" && chkConv3d.Checked)
+                s = "2D \u2192 3D: iw3 makes the full-size picture 3D first (" + Iw3Summary() + "), then it's encoded as 3D. Slow: a top graphics card does " +
+                    "about 0.6x real time with Best, so a 2-hour film takes ~3 hours. The file's info records how it was made 3D.";
+            else if (rad3D.Checked && lay == "2d") s += "3D output needs a side-by-side source. Set the layout to HSBS or FSBS, tick 2D \u2192 3D (iw3), or choose 2D output.";
             else if (rad3D.Checked) s += "3D: the left and right halves become the two eyes (lossless 800x240 AVI, then the official Mobiclip encoder, 2 passes).";
             else if (lay != "2d") s += "2D from a side-by-side source: only the left eye is used.";
             else s += "2D: lossless 400x240 AVI, then the official Mobiclip encoder (2 passes).";
@@ -1881,7 +1906,7 @@ namespace MoflexStudio
             showCarry["season"] = s; showCarry["episode"] = e;               // so a file without S/E in its name counts on
             UpdateCarryBox();
             string tid = J.S(J.G(showCarry, "tmdb_id"));
-            if (tid == "" || txtToken.Text.Trim() == "") return;
+            if (tid == "") return;
             try
             {
                 var d = await Backend.Call("tmdb-details", "tv", tid, s + ":" + e);
@@ -1895,7 +1920,6 @@ namespace MoflexStudio
         // ---- info tab
         async Task TmdbSearch()
         {
-            if (txtToken.Text.Trim() == "") { SetStatus("Add your TMDB token in Settings first."); tabs.SelectedIndex = 5; return; }
             if (J.S(J.G(settings, "tmdb_token")) != txtToken.Text.Trim()) SaveSettings();
             string q = txtQuery.Text.Trim(); if (q == "") return;
             string year = "";
@@ -2039,6 +2063,7 @@ namespace MoflexStudio
             curTmdbId = "";
             txtOutDir.Text = DefaultOutDir(); chkSuper.Checked = true; chkOverwrite.Checked = false;
             btnAdd.Text = "Add to queue"; btnCancelEdit.Visible = false; lblEditing.Text = "";
+            chkConv3d.Checked = false; chkKeepSbs.Checked = false; conv3dOver.Clear(); SelectItem(cmbTpl, "best");
             UpdateVideoNote(); UpdateAutoName();
             if (tabs.SelectedIndex == 5 && toolsReady) tabs.SelectedIndex = 0;
         }
@@ -2058,7 +2083,14 @@ namespace MoflexStudio
             {
                 string lay = (string)job["source_type"];
                 if (lay == "auto") lay = J.S(J.G(J.G(probe, "video"), "detected"));
-                if (lay == "2d") { error = "3D output needs a side-by-side source: set Video > Source layout to HSBS/FSBS or choose 2D."; tabs.SelectedIndex = 0; return null; }
+                if (lay == "2d" && !chkConv3d.Checked) { error = "3D output needs a side-by-side source: set Video > Source layout to HSBS/FSBS, tick 2D \u2192 3D (iw3), or choose 2D."; tabs.SelectedIndex = 0; return null; }
+                if (lay == "2d" && chkConv3d.Checked)
+                {
+                    if (!J.B(J.G(iw3Status, "installed"))) { error = "2D \u2192 3D needs iw3: Video > Install iw3."; tabs.SelectedIndex = 0; return null; }
+                    var cv = new Dict(conv3dOver);
+                    cv["enabled"] = true; cv["template"] = TplName(); cv["keep_sbs"] = chkKeepSbs.Checked;
+                    job["conv3d"] = cv;
+                }
             }
             error = audio1.Validate();
             if (error != null) { tabs.SelectedIndex = 1; return null; }
@@ -2388,7 +2420,185 @@ namespace MoflexStudio
             return null;
         }
 
-        static string StageShort(string s) { return s == "avi" ? "AVI" : s == "moflex" ? "Encoding" : s == "super" ? "Building" : s; }
+        static string StageShort(string s) { return s == "iw3" ? "2D\u21923D" : s == "avi" ? "AVI" : s == "moflex" ? "Encoding" : s == "super" ? "Building" : s; }
+
+        // ============================================================ 2D -> 3D (iw3)
+        string TplName() { var it = cmbTpl.SelectedItem as Item; return it == null ? "best" : (string)it.Tag; }
+
+        // a template's settings with this job's changes on top
+        Dict Iw3Current()
+        {
+            var d = new Dict();
+            var def = J.D(J.G(iw3Status, "defaults")); if (def != null) foreach (var kv in def) d[kv.Key] = kv.Value;
+            var tpl = J.D(J.G(J.G(iw3Status, "templates"), TplName()));
+            if (tpl != null) foreach (var kv in tpl) if (def != null && def.ContainsKey(kv.Key)) d[kv.Key] = kv.Value;
+            foreach (var kv in conv3dOver) d[kv.Key] = kv.Value;
+            return d;
+        }
+
+        string Iw3Summary()
+        {
+            if (iw3Status == null) return "iw3";
+            var c = Iw3Current();
+            return J.S(J.G(c, "model")) + ", depth " + J.S(J.G(c, "resolution")) + ", " + J.S(J.G(c, "method")) + (conv3dOver.Count > 0 ? ", changed" : "");
+        }
+
+        async Task RefreshIw3(string select)
+        {
+            try { iw3Status = J.D(await Backend.Call("iw3-status")); }
+            catch (Exception ex) { lblIw3.Text = "iw3: " + ex.Message; return; }
+            string keep = select ?? TplName();
+            cmbTpl.Items.Clear();
+            foreach (var kv in J.D(J.G(iw3Status, "templates")) ?? new Dict())
+                cmbTpl.Items.Add(new Item(J.S(J.G(kv.Value, "label")) + (J.B(J.G(kv.Value, "builtin")) ? "" : "  (yours)"), kv.Key));
+            SelectItem(cmbTpl, keep); if (cmbTpl.SelectedIndex < 0 && cmbTpl.Items.Count > 0) cmbTpl.SelectedIndex = 0;
+            bool ok = J.B(J.G(iw3Status, "installed"));
+            lblIw3.Text = ok ? "iw3 found" : "iw3 not installed";
+            btnIw3Install.Visible = !ok;
+            UpdateVideoNote();
+        }
+
+        async Task InstallIw3()
+        {
+            if (iw3Installing) return;
+            if (MessageBox.Show(this, "Install iw3 (nunif, MIT licence) for 2D \u2192 3D?\n\n" +
+                "Its own installer downloads a private Python, PyTorch with graphics-card support and the depth models: several GB, " +
+                "into " + Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Moflex Studio", "iw3") + ".\n\n" +
+                "An NVIDIA graphics card is strongly recommended. It can take a while.\n\n" +
+                "Already have iw3 somewhere else? Cancel, then set its folder in Video > Settings....",
+                "Install iw3", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            iw3Installing = true; btnIw3Install.Enabled = false; lblIw3.Text = "installing...";
+            var tcs = new TaskCompletionSource<bool>();
+            string err = null;
+            var p = new Process { StartInfo = Backend.Psi("iw3-install"), EnableRaisingEvents = true };
+            p.OutputDataReceived += (s, e) =>
+            {
+                if (e.Data == null) return;
+                object ev; try { ev = J.Parse(e.Data); } catch { return; }
+                string t = J.S(J.G(ev, "type"));
+                UI(() =>
+                {
+                    if (t == "stage") { SetStatus(J.S(J.G(ev, "text"))); Log(J.S(J.G(ev, "text"))); }
+                    else if (t == "log") { Log("  " + J.S(J.G(ev, "text"))); lblIw3.Text = "installing..."; }
+                    else if (t == "error") err = J.S(J.G(ev, "message"));
+                });
+            };
+            p.ErrorDataReceived += (s, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) UI(() => Log(e.Data)); };
+            p.Exited += (s, e) => { try { p.WaitForExit(); } catch { } tcs.TrySetResult(true); };
+            p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
+            await tcs.Task;
+            iw3Installing = false; btnIw3Install.Enabled = true;
+            await RefreshIw3(null);
+            if (err != null) { SetStatus("iw3 install failed: " + err); MessageBox.Show(this, err, "iw3 install failed", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            else if (J.B(J.G(iw3Status, "installed"))) SetStatus("iw3 is installed.");
+        }
+
+        // every iw3 setting: use for this job, save as a template of your own, or delete one of yours
+        void EditIw3Settings()
+        {
+            if (iw3Status == null) { SetStatus("Still checking for iw3..."); return; }
+            var c = Iw3Current();
+            var f = new Form { Text = "2D \u2192 3D settings  (" + cmbTpl.Text + ")", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(470, 498), Font = Font };
+            int y = 12;
+            Func<string, Control, Control> row = (label, ctl) =>
+            {
+                f.Controls.Add(new Label { Text = label, Left = 12, Top = y + 3, Width = 170 });
+                ctl.Left = 186; ctl.Top = y; if (ctl.Width < 60) ctl.Width = 120; f.Controls.Add(ctl); y += 28; return ctl;
+            };
+            Func<object, decimal, decimal, decimal, int, NumericUpDown> num = (v, min, max, inc, dec) =>
+                new NumericUpDown { Minimum = min, Maximum = max, Increment = inc, DecimalPlaces = dec, Width = 90,
+                    Value = Math.Max(min, Math.Min(max, (decimal)J.F(v))) };
+            var cModel = new ComboBox { Width = 160, DropDownStyle = ComboBoxStyle.DropDown };
+            foreach (var m in J.A(J.G(iw3Status, "models"))) cModel.Items.Add(J.S(m));
+            cModel.Text = J.S(J.G(c, "model"));
+            row("Depth model", cModel);
+            var nDiv = (NumericUpDown)row("3D strength", num(J.G(c, "divergence"), 0, 10, 0.1m, 2));
+            var nConv = (NumericUpDown)row("Convergence plane", num(J.G(c, "convergence"), -2, 2, 0.05m, 2));
+            var cCm = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList }; cCm.Items.AddRange(new object[] { "sod_v1", "constant" });
+            cCm.SelectedItem = J.S(J.G(c, "convergence_mode")); if (cCm.SelectedIndex < 0) cCm.SelectedIndex = 0;
+            row("Convergence (auto: sod_v1)", cCm);
+            var nIpd = (NumericUpDown)row("Your own size (IPD offset)", num(J.G(c, "ipd_offset"), -10, 20, 1, 0));
+            var cSyn = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList }; cSyn.Items.AddRange(new object[] { "both", "right", "left" });
+            cSyn.SelectedItem = J.S(J.G(c, "synthetic_view")); if (cSyn.SelectedIndex < 0) cSyn.SelectedIndex = 0;
+            row("Synthetic view", cSyn);
+            var cMeth = new ComboBox { Width = 160, DropDownStyle = ComboBoxStyle.DropDownList };
+            cMeth.Items.AddRange(new object[] { "mlbw_l2s", "mlbw_l4s", "mlbw_l2", "mlbw_l4", "row_flow_v3", "row_flow_v3_sym", "row_flow_v2", "row_flow", "forward_fill", "backward" });
+            cMeth.SelectedItem = J.S(J.G(c, "method")); if (cMeth.SelectedIndex < 0) cMeth.SelectedIndex = 0;
+            row("Method", cMeth);
+            var nSw = (NumericUpDown)row("Stereo width (0 = default)", num(J.G(c, "stereo_width"), 0, 4096, 64, 0));
+            var nRes = (NumericUpDown)row("Depth resolution (0 = default)", num(J.G(c, "resolution"), 0, 2048, 8, 0));
+            var kLim = (CheckBox)row("", new CheckBox { Text = "Limit to the source size", Width = 220, Checked = J.B(J.G(c, "limit_resolution")) });
+            var nFg = (NumericUpDown)row("Foreground scale", num(J.G(c, "foreground_scale"), -3, 3, 0.25m, 2));
+            var ed = J.A(J.G(c, "edge_dilation"));
+            var nEdX = num(ed.Length > 0 ? ed[0] : 0, 0, 20, 1, 0); nEdX.Width = 60;
+            var nEdY = num(ed.Length > 1 ? ed[1] : (ed.Length > 0 ? ed[0] : 0), 0, 20, 1, 0); nEdY.Width = 60;
+            row("Edge fix  (x, y)", nEdX); nEdY.Left = 252; nEdY.Top = y - 28; f.Controls.Add(nEdY);
+            var kEma = (CheckBox)row("", new CheckBox { Text = "Flicker reduction (EMA)", Width = 220, Checked = J.B(J.G(c, "ema")) });
+            var nEmaD = (NumericUpDown)row("  EMA decay", num(J.G(c, "ema_decay"), 0, 1, 0.01m, 2));
+            var nEmaB = (NumericUpDown)row("  EMA buffer (frames)", num(J.G(c, "ema_buffer"), 1, 300, 1, 0));
+            var kScene = (CheckBox)row("", new CheckBox { Text = "Scene boundary detection", Width = 220, Checked = J.B(J.G(c, "scene_detect")) });
+            var kBorder = (CheckBox)row("", new CheckBox { Text = "Preserve the screen border", Width = 220, Checked = J.B(J.G(c, "preserve_border")) });
+            var nCrf = (NumericUpDown)row("Intermediate quality (CRF)", num(J.G(c, "crf"), 0, 40, 1, 0));
+            y += 4;
+            f.Controls.Add(new Label { Text = "iw3 folder", Left = 12, Top = y + 3, Width = 80 });
+            var tDir = new TextBox { Left = 96, Top = y, Width = 324, Text = J.S(J.G(settings, "iw3_dir")) };
+            var bDir = new Button { Text = "...", Left = 424, Top = y - 1, Width = 34, Height = 25 };
+            bDir.Click += delegate { var pth = PickFolder(tDir.Text); if (pth != null) tDir.Text = pth; };
+            f.Controls.Add(tDir); f.Controls.Add(bDir); y += 34;
+            var bOk = new Button { Text = "Use for this video", Left = 12, Top = y, Width = 130, Height = 28, DialogResult = DialogResult.OK };
+            var bSave = new Button { Text = "Save as template...", Left = 148, Top = y, Width = 130, Height = 28 };
+            var bDel = new Button { Text = "Delete template", Left = 284, Top = y, Width = 110, Height = 28,
+                Enabled = !J.B(J.G(J.G(J.G(iw3Status, "templates"), TplName()), "builtin")) };
+            var bCancel = new Button { Text = "Cancel", Left = 400, Top = y, Width = 58, Height = 28, DialogResult = DialogResult.Cancel };
+            f.Controls.AddRange(new Control[] { bOk, bSave, bDel, bCancel });
+            f.AcceptButton = bOk; f.CancelButton = bCancel;
+            Func<Dict> collect = () => new Dict {
+                { "model", cModel.Text.Trim() }, { "divergence", (double)nDiv.Value }, { "convergence", (double)nConv.Value },
+                { "convergence_mode", cCm.Text }, { "ipd_offset", (int)nIpd.Value }, { "synthetic_view", cSyn.Text }, { "method", cMeth.Text },
+                { "stereo_width", (int)nSw.Value }, { "resolution", (int)nRes.Value }, { "limit_resolution", kLim.Checked },
+                { "foreground_scale", (double)nFg.Value }, { "edge_dilation", new object[] { (int)nEdX.Value, (int)nEdY.Value } },
+                { "ema", kEma.Checked }, { "ema_decay", (double)nEmaD.Value }, { "ema_buffer", (int)nEmaB.Value },
+                { "scene_detect", kScene.Checked }, { "preserve_border", kBorder.Checked }, { "crf", (int)nCrf.Value } };
+            string saved = null; bool deleted = false;
+            bSave.Click += async delegate
+            {
+                string name = Prompt(f, "Save as template", "A name for these settings (letters, digits, spaces):", "");
+                if (string.IsNullOrWhiteSpace(name)) return;
+                var t = collect(); t["label"] = name.Trim();
+                try { saved = J.S(J.G(await Backend.Call("iw3-save-template", name.Trim(), J.Dump(t)), "name")); f.DialogResult = DialogResult.OK; }
+                catch (Exception ex) { MessageBox.Show(f, ex.Message, "Save template", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            };
+            bDel.Click += async delegate
+            {
+                if (MessageBox.Show(f, "Delete the template \"" + TplName() + "\"?", "Delete template", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
+                try { await Backend.Call("iw3-delete-template", TplName()); deleted = true; f.DialogResult = DialogResult.Cancel; }
+                catch (Exception ex) { MessageBox.Show(f, ex.Message); }
+            };
+            var res = f.ShowDialog(this);
+            if (tDir.Text.Trim() != J.S(J.G(settings, "iw3_dir"))) { settings["iw3_dir"] = tDir.Text.Trim(); try { SaveSettings(); } catch { } }
+            if (saved != null) { conv3dOver.Clear(); var _ = RefreshIw3(saved); return; }
+            if (deleted) { conv3dOver.Clear(); var _ = RefreshIw3("best"); return; }
+            if (res == DialogResult.OK)
+            {
+                // only what differs from the template is kept as this video's change
+                conv3dOver = new Dict(); var basec = Iw3Current();
+                foreach (var kv in collect()) if (J.Dump(kv.Value) != J.Dump(J.G(basec, kv.Key))) conv3dOver[kv.Key] = kv.Value;
+            }
+            var __ = RefreshIw3(null);
+        }
+
+        static string Prompt(IWin32Window owner, string title, string text, string def)
+        {
+            var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 104) };
+            f.Controls.Add(new Label { Text = text, Left = 12, Top = 12, Width = 336 });
+            var t = new TextBox { Left = 12, Top = 36, Width = 336, Text = def, MaxLength = 32 };
+            var ok = new Button { Text = "OK", Left = 192, Top = 68, Width = 75, DialogResult = DialogResult.OK };
+            var cn = new Button { Text = "Cancel", Left = 273, Top = 68, Width = 75, DialogResult = DialogResult.Cancel };
+            f.Controls.AddRange(new Control[] { t, ok, cn }); f.AcceptButton = ok; f.CancelButton = cn;
+            return f.ShowDialog(owner) == DialogResult.OK ? t.Text : null;
+        }
 
         string stageBeforePause = "", statusBeforePause = "";
         void TogglePause()

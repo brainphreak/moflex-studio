@@ -574,6 +574,12 @@ def tmdb(path, **params):
 def tmdb_proxy(path, params):
     """one TMDB lookup through clownsec.com's proxy (see its tmdb.php for what it answers)"""
     import urllib.request, urllib.parse
+    f = re.match(r'^find/(tt\d{5,10})$', path)
+    if f:
+        req = urllib.request.Request(TMDB_PROXY + '?' + urllib.parse.urlencode({'q': 'find', 'imdb': f.group(1)}),
+                                     headers={'User-Agent': 'moflex-studio'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
     m = re.match(r'^(search/movie|search/tv|movie/(\d+)|tv/(\d+)(?:/season/(\d+)(?:/episode/(\d+))?)?)$', path)
     if not m:
         raise RuntimeError(f'TMDB lookup {path} needs a TMDB token of your own (Settings)')
@@ -604,6 +610,22 @@ def tmdb_proxy(path, params):
     return d
 
 def tmdb_search(kind, query, year=None):
+    imdb = re.search(r'\btt\d{5,10}\b', query or '')
+    if imdb:   # an IMDb id (or an imdb.com link): TMDB finds it directly
+        r = tmdb(f'find/{imdb.group(0)}', external_source='imdb_id')
+        out = []
+        for k, x in [('tv', x) for x in r.get('tv_results') or []] + [('movie', x) for x in r.get('movie_results') or []]:
+            if kind == 'tv' and k != 'tv' or kind != 'tv' and k == 'tv':
+                continue
+            out.append({'id': x['id'], 'title': x.get('name') or x.get('title'),
+                        'year': (x.get('first_air_date') or x.get('release_date') or '')[:4],
+                        'overview': x.get('overview', ''), 'poster': x.get('poster_path')})
+        if out:
+            return out
+        if r.get('tv_results') or r.get('movie_results'):
+            raise RuntimeError(f"{imdb.group(0)} is a {'TV show' if r.get('tv_results') else 'movie'} on TMDB:"
+                               f" switch Movie/TV and search again")
+        raise RuntimeError(f'{imdb.group(0)} is not on TMDB')
     if kind == 'tv':
         r = tmdb('search/tv', query=query, **({'first_air_date_year': year} if year else {}))
         return [{'id': x['id'], 'title': x.get('name'), 'year': (x.get('first_air_date') or '')[:4],
@@ -772,9 +794,76 @@ def iw3_settings(c):
     tpl = iw3_templates().get(c.get('template') or 'best') or {}
     out = dict(IW3_DEFAULTS)
     out.update({k: v for k, v in tpl.items() if k in IW3_DEFAULTS})
+    base = dict(out)
     out.update({k: v for k, v in c.items() if k in IW3_DEFAULTS})
     out['template'] = c.get('template') or 'best'
+    if any(out[k] != base[k] for k in IW3_DEFAULTS if k not in ('keep_sbs', 'crf')):
+        out['template'] += ' (changed)'      # the file's conv3d= label must not claim the template as is
     return out
+
+def iw3_save_template(name, settings):
+    """keep the user's own template (settings: IW3_DEFAULTS' keys, plus a 'label')"""
+    name = re.sub(r'[^A-Za-z0-9 _-]', '', str(name)).strip()[:32]
+    if not name:
+        raise RuntimeError('a template needs a name')
+    if name in IW3_TEMPLATES:
+        raise RuntimeError(f"'{name}' is a built-in template: choose another name")
+    try:
+        with open(IW3_TEMPLATES_FILE, encoding='utf-8-sig') as f:
+            mine = json.load(f)
+    except (OSError, ValueError):
+        mine = {}
+    t = {k: v for k, v in settings.items() if k in IW3_DEFAULTS}
+    t['label'] = str(settings.get('label') or name)[:60]
+    mine[name] = t
+    with open(IW3_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(mine, f, indent=1)
+    return name
+
+def iw3_delete_template(name):
+    try:
+        with open(IW3_TEMPLATES_FILE, encoding='utf-8-sig') as f:
+            mine = json.load(f)
+    except (OSError, ValueError):
+        mine = {}
+    mine.pop(name, None)
+    with open(IW3_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(mine, f, indent=1)
+
+# iw3's own Windows installer (nunif's windows_package): a private Python 3.12 and MinGit, nunif
+# itself, PyTorch with GPU support (most of the download, a few GB) and the models it fetches ahead
+IW3_PKG_RAW = 'https://raw.githubusercontent.com/nagadomi/nunif/master/windows_package/'
+IW3_PKG_FILES = ['install.bat', 'update.bat', 'setenv.bat', 'update-installer.bat', 'iw3-gui.bat', 'nunif-prompt.bat']
+
+def iw3_install():
+    """iw3 into Studio's own folder (%LOCALAPPDATA%\\Moflex Studio\\iw3), with its progress as events"""
+    import urllib.request
+    if not IS_WIN:
+        raise RuntimeError('iw3 is installed this way on Windows only')
+    root = iw3_dirs()[-1]
+    os.makedirs(root, exist_ok=True)
+    emit('stage', stage='iw3-install', index=1, total=3, text='Downloading iw3\'s installer')
+    for f in IW3_PKG_FILES:
+        req = urllib.request.Request(IW3_PKG_RAW + f, headers={'User-Agent': 'moflex-studio'})
+        with urllib.request.urlopen(req, timeout=60) as r, open(os.path.join(root, f), 'wb') as o:
+            o.write(r.read())
+    emit('stage', stage='iw3-install', index=2, total=3,
+         text='Installing iw3: Python, PyTorch (a few GB) and the models -- this takes a while')
+    p = subprocess.Popen(['cmd', '/c', os.path.join(root, 'update.bat')], cwd=root, stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+    p.stdin.write(b'\r\n' * 4); p.stdin.close()   # the script ends with "pause"
+    tail = []
+    for raw in p.stdout:
+        line = raw.decode('utf-8', 'replace').strip()
+        if line:
+            tail = (tail + [line])[-10:]
+            log(line[:300], 'iw3-install')
+    p.wait()
+    r, py = iw3_find()
+    if not r or r != root:
+        raise RuntimeError('iw3\'s installer did not finish: ' + ' | '.join(tail[-4:])[-500:])
+    emit('stage', stage='iw3-install', index=3, total=3, text='iw3 is installed')
+    emit('done', output=root)
 
 IW3_MODELS = ['Distill_Any_L', 'Distill_Any_B', 'Distill_Any_S', 'VDA_L', 'VDA_B', 'VDA_S',
               'VDA_Stream_L', 'Any_V2_L', 'Any_V2_B', 'Any_V2_S', 'Any_L', 'Any_B', 'Any_S',
@@ -1583,6 +1672,12 @@ def main():
             run_job(a[1])
         elif a[0] == 'make':          # the command line for people (moflex-studio.cmd make ...)
             make_cmd(a[1:])
+        elif a[0] == 'iw3-save-template':   # iw3-save-template NAME '{"label":..,"model":..}'
+            print(json.dumps({'name': iw3_save_template(a[1], json.loads(a[2]))}))
+        elif a[0] == 'iw3-delete-template':
+            iw3_delete_template(a[1]); print(json.dumps({'ok': True}))
+        elif a[0] == 'iw3-install':          # events, like run
+            iw3_install()
         elif a[0] == 'iw3-status':    # for the 2D to 3D panel: is iw3 here, and what it offers
             root, py = iw3_find()
             print(json.dumps({'installed': bool(root), 'dir': root or '', 'looked': iw3_dirs(),
