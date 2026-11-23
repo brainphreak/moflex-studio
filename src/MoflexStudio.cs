@@ -464,6 +464,8 @@ namespace MoflexStudio
         const string UpdateBase = "https://www.clownsec.com/studio/";
         const string PyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip";
         const string FfUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+        // the open moflex encoder (Mobipeg-MOFLEX + clownsec patches, GPL-2.0; source: github.com/brainphreak/clownsec-moflex-encoder)
+        const string OpenEncUrl = "https://www.clownsec.com/studio/tools/moflex-ffmpeg-windows-x64.zip";
 
         string appDir, settingsPath, queuePath;
         Dict settings = new Dict();
@@ -498,7 +500,7 @@ namespace MoflexStudio
         NumericUpDown numS, numE; PictureBox picArt; Label lblArt; Button btnArtKeep;
         TextBox txtOutDir, txtOutName; Label lblAutoName; CheckBox chkSuper, chkOverwrite;
         CheckBox chkCarry, chkRememberOut;
-        TextBox txtToken, txtDefOut; NumericUpDown numDefBitrate; Label lblTools; Button btnDownload;
+        TextBox txtToken, txtDefOut; NumericUpDown numDefBitrate; Label lblTools; Button btnDownload; ComboBox cmbEncoder;
         Button btnUpdate; Label lblVersion; string updateVer, updateMd5;
         Button btnAdd, btnClear, btnCancelEdit; Label lblEditing;
         // queue + progress
@@ -782,7 +784,18 @@ namespace MoflexStudio
             Note(tSet, "The API Read Access Token from themoviedb.org (Settings > API). Optional: without one, searches go through clownsec.com.", 108, 40, 478, 32);
             L(tSet, "Bitrate", 10, 80, 96);
             numDefBitrate = Add(tSet, new NumericUpDown { Left = 108, Top = 80, Width = 80, Minimum = 200, Maximum = 8000, Increment = 100, Value = 1400 });
-            L(tSet, "kbps default", 192, 80, 100);
+            L(tSet, "kbps default", 192, 80, 80);
+            L(tSet, "Encoder", 290, 80, 56);
+            cmbEncoder = Add(tSet, new ComboBox { Left = 348, Top = 80, Width = 236, DropDownStyle = ComboBoxStyle.DropDownList });
+            cmbEncoder.Items.Add(new Item("Mobiclip (Nintendo's, best quality)", "mobiclip"));
+            cmbEncoder.Items.Add(new Item("Open encoder (any system, open source)", "open"));
+            cmbEncoder.SelectedIndex = 0;
+            cmbEncoder.SelectedIndexChanged += async delegate
+            {
+                settings["encoder"] = EncoderChoice(); try { SaveSettings(); } catch { }
+                UpdateVideoNote();
+                if (EncoderChoice() == "open") await CheckTools(true);    // fetches it if it isn't here yet
+            };
             L(tSet, "Output folder", 10, 112, 96);
             txtDefOut = Add(tSet, new TextBox { Left = 108, Top = 112, Width = 436 });
             var bDefOut = Add(tSet, new Button { Text = "...", Left = 548, Top = 111, Width = 34, Height = 25 });
@@ -812,7 +825,7 @@ namespace MoflexStudio
             lblVersion = new Label { Text = "Version " + AppVersion, Left = 470, Top = 178, Width = 100, ForeColor = SystemColors.GrayText };
             grp.Controls.Add(btnDownload); grp.Controls.Add(bAppDir); grp.Controls.Add(btnUpdate); grp.Controls.Add(lblVersion);
             btnUpdate.Click += async delegate { await CheckUpdate(true); };
-            btnDownload.Click += async delegate { await CheckTools(true); };
+            btnDownload.Click += async delegate { downloadAll = true; try { await CheckTools(true); } finally { downloadAll = false; } };
             bAppDir.Click += delegate { Process.Start("explorer.exe", Backend.Quote(appDir)); };
 
             // ---- editor buttons
@@ -949,7 +962,11 @@ namespace MoflexStudio
             int br = J.I(J.G(settings, "default_bitrate")); if (br >= 200) numDefBitrate.Value = Math.Min(8000, br);
             txtDefOut.Text = J.S(J.G(settings, "default_output"));
             chkRememberOut.Checked = !J.Has(settings, "remember_output") || J.B(J.G(settings, "remember_output"));
+            SelectItem(cmbEncoder, J.S(J.G(settings, "encoder")) == "open" ? "open" : "mobiclip");
         }
+
+        string EncoderChoice() { var it = cmbEncoder == null ? null : cmbEncoder.SelectedItem as Item; return it == null ? "mobiclip" : (string)it.Tag; }
+        string OpenEncPath() { return Path.Combine(ToolPath("ffmpeg_dir", Path.Combine(appDir, "bin")), "moflex-ffmpeg.exe"); }
 
         // where a new job's output goes: the last folder used (if remembered), else the default from Settings
         string DefaultOutDir()
@@ -971,6 +988,7 @@ namespace MoflexStudio
             settings["default_bitrate"] = (int)numDefBitrate.Value;
             settings["default_output"] = txtDefOut.Text.Trim();
             settings["remember_output"] = chkRememberOut.Checked;
+            settings["encoder"] = EncoderChoice();
             File.WriteAllText(settingsPath, J.Dump(settings), new UTF8Encoding(false));
         }
 
@@ -987,13 +1005,16 @@ namespace MoflexStudio
             Backend.Python = cfg != "" ? cfg : emb;
         }
 
+        bool downloadAll;   // the Download button: optional tools too (the open encoder)
         async Task CheckTools(bool download)
         {
             FindPython();
             string bin = ToolPath("ffmpeg_dir", Path.Combine(appDir, "bin"));
             bool py = File.Exists(Backend.Python);
             bool ff = File.Exists(Path.Combine(bin, "ffmpeg.exe")) && File.Exists(Path.Combine(bin, "ffprobe.exe"));
-            if (download && (!py || !ff))
+            bool oe = File.Exists(OpenEncPath());
+            bool wantOe = EncoderChoice() == "open" || downloadAll;
+            if (download && (!py || !ff || (!oe && wantOe)))
             {
                 btnDownload.Enabled = false;
                 try
@@ -1002,6 +1023,7 @@ namespace MoflexStudio
                     catch { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; }
                     if (!py) { await Fetch(PyUrl, "Python 3.11 (embeddable)", Path.Combine(appDir, "python"), null); }
                     if (!ff) { await Fetch(FfUrl, "ffmpeg (gyan.dev release essentials)", Path.Combine(appDir, "bin"), new[] { "ffmpeg.exe", "ffprobe.exe" }); }
+                    if (!oe && wantOe) { await Fetch(OpenEncUrl, "the open moflex encoder", Path.GetDirectoryName(OpenEncPath()), new[] { "moflex-ffmpeg.exe" }); }
                     SetStatus("Tools downloaded.");
                 }
                 catch (Exception ex) { SetStatus("Download failed: " + ex.Message + "  (Settings > Download missing tools to retry)"); }
@@ -1014,9 +1036,13 @@ namespace MoflexStudio
             string lic = ToolPath("license", Path.Combine(appDir, "User_CTR.lic"));
             Func<bool, string> ok = b => b ? "OK     " : "MISSING";
             Func<string, string> rel = x => x.StartsWith(appDir, StringComparison.OrdinalIgnoreCase) ? "app" + x.Substring(appDir.Length) : x;
-            toolsText = string.Format("{0}  Python      {1}\n{2}  ffmpeg      {3}\n{4}  Mobiclip    {5}\n{6}  RunAsDate   {7}\n{8}  license     {9}",
-                ok(py), rel(Backend.Python), ok(ff), rel(bin), ok(File.Exists(enc)), rel(enc), ok(File.Exists(rad)), rel(rad), ok(File.Exists(lic)), rel(lic));
-            toolsNote = File.Exists(enc) ? "" : "Without the Mobiclip encoder, video files can't be converted (moflex editing still works).";
+            bool mc = File.Exists(enc) && File.Exists(rad) && File.Exists(lic);
+            toolsText = string.Format("{0}  Python        {1}\n{2}  ffmpeg        {3}\n{4}  Mobiclip      {5}\n{6}  open encoder  {7}",
+                ok(py), rel(Backend.Python), ok(ff), rel(bin),
+                ok(mc), mc ? rel(Path.GetDirectoryName(enc)) + "  (+ RunAsDate, licence)"
+                    : (File.Exists(enc) ? "" : "encoder ") + (File.Exists(rad) ? "" : "RunAsDate ") + (File.Exists(lic) ? "" : "licence ") + "missing",
+                oe ? "OK     " : "-      ", oe ? rel(OpenEncPath()) : "not installed (optional: Download missing tools)");
+            toolsNote = mc || oe ? "" : "No moflex encoder: video files can't be converted (moflex editing still works). Download missing tools gets the open one.";
             UpdateToolsLabel();
             toolsReady = py && ff;
             btnAdd.Enabled = btnStart.Enabled = btnOpen.Enabled = toolsReady && !queueActive;
@@ -1029,8 +1055,8 @@ namespace MoflexStudio
         {
             string iw3 = iw3Status == null ? "...      iw3 (2D->3D) checking"
                 : J.B(J.G(iw3Status, "installed"))
-                    ? "OK       iw3 (2D->3D) " + RelApp(J.S(J.G(iw3Status, "dir"))) + "  (" + J.A(J.G(iw3Status, "catalog")).Count(m => J.B(J.G(m, "have"))) + " depth models)"
-                    : "-        iw3 (2D->3D) not installed (optional)";
+                    ? "OK       iw3 2D->3D    " + RelApp(J.S(J.G(iw3Status, "dir"))) + "  (" + J.A(J.G(iw3Status, "catalog")).Count(m => J.B(J.G(m, "have"))) + " depth models)"
+                    : "-        iw3 2D->3D    not installed (optional)";
             lblTools.Text = toolsText + "\n" + iw3 + (toolsNote != "" ? "\n" + toolsNote : "");
         }
         string RelApp(string x) { return x.StartsWith(appDir, StringComparison.OrdinalIgnoreCase) ? "app" + x.Substring(appDir.Length) : x; }
@@ -1226,6 +1252,7 @@ namespace MoflexStudio
             job["output"] = kind == "video" ? (rad2D.Checked ? "2d" : "3d") : (J.B(J.G(J.G(pr, "moflex"), "is3d")) ? "3d" : "2d");
             if (kind == "video" && J.S(J.G(J.G(pr, "video"), "detected")) == "2d") job["output"] = "2d";
             job["bitrate"] = (int)numBitrate.Value;
+            job["encoder"] = EncoderChoice();
             var aud = new Dict(); job["audio"] = aud;
             var parsed = J.G(pr, "parsed");
             if (kind == "video")
@@ -1528,9 +1555,10 @@ namespace MoflexStudio
                 s = "2D \u2192 3D: iw3 makes the full-size picture 3D first (" + Iw3Summary() + "), then it's encoded as 3D. Slow: a top graphics card does " +
                     "about 0.6x real time with Best, so a 2-hour film takes ~3 hours. The file's info records how it was made 3D.";
             else if (rad3D.Checked && lay == "2d") s += "3D output needs a side-by-side source. Set the layout to HSBS or FSBS, tick 2D \u2192 3D (iw3), or choose 2D output.";
-            else if (rad3D.Checked) s += "3D: the left and right halves become the two eyes (lossless 800x240 AVI, then the official Mobiclip encoder, 2 passes).";
+            else if (rad3D.Checked) s += "3D: the left and right halves become the two eyes (" + (EncoderChoice() == "open"
+                ? "the open encoder, straight from the source)." : "lossless 800x240 AVI, then the official Mobiclip encoder, 2 passes).");
             else if (lay != "2d") s += "2D from a side-by-side source: only the left eye is used.";
-            else s += "2D: lossless 400x240 AVI, then the official Mobiclip encoder (2 passes).";
+            else s += EncoderChoice() == "open" ? "2D: the open encoder, straight from the source." : "2D: lossless 400x240 AVI, then the official Mobiclip encoder (2 passes).";
             lblVideoNote.Text = s;
         }
 
@@ -2104,6 +2132,9 @@ namespace MoflexStudio
             job["source_type"] = lit == null ? "auto" : (string)lit.Tag;
             job["output"] = rad3D.Checked ? "3d" : "2d";
             job["bitrate"] = (int)numBitrate.Value;
+            job["encoder"] = EncoderChoice();
+            if (kind == "video" && job["encoder"].ToString() == "open" && !File.Exists(OpenEncPath()))
+            { error = "The open encoder isn't installed: Settings > Download missing tools (or choose Mobiclip)."; tabs.SelectedIndex = 5; return null; }
             if (kind == "video" && rad3D.Checked)
             {
                 string lay = (string)job["source_type"];

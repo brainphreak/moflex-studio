@@ -78,6 +78,8 @@ def load_settings():
     s = {
         'ffmpeg_dir': os.path.join(HERE, 'bin') if os.path.isdir(os.path.join(HERE, 'bin')) else '',
         'encoder_dir': os.path.join(HERE, 'encoder'),
+        'encoder': 'mobiclip',          # the moflex encoder: 'mobiclip' (Nintendo's, Windows) or 'open'
+        'open_encoder': os.path.join(HERE, 'bin', 'moflex-ffmpeg.exe' if os.name == 'nt' else 'moflex-ffmpeg'),
         'runasdate': os.path.join(HERE, 'RunAsDate.exe'),
         'runasdate_date': '14\\01\\2022 00:00:00',
         'license': os.path.join(HERE, 'User_CTR.lic'),
@@ -156,33 +158,154 @@ def human(e):
         out.write(f"\nError: {e.get('message')}\n")
     out.flush()
 
-MAKE_HELP = """moflex-studio make -- one video (or moflex) into a SUPER MOFLEX, from the command line
+MAKE_HELP = """moflex-studio make -- everything the window does, from the command line
 
   moflex-studio make SOURCE [options]
+  moflex-studio probe SOURCE      the source's audio and subtitle streams (their numbers) and info
+  moflex-studio run JOB.json      a job file (what the window writes; --save-job makes one)
 
-  --3d | --2d                 what to encode (default: 3D for a 3D source or with --conv3d, else 2D)
-  --source-type T             auto (default), 2d, hsbs, fsbs: how the source's picture is laid out
-  --conv3d [TEMPLATE]         make a 2D source 3D with iw3 first: best (default), high, medium, low,
-                              or a template of your own (see --templates)
-  --keep-sbs                  keep iw3's 3D side-by-side video beside the output
-  --templates                 list the 2D-to-3D templates and exit
-  --title T  --year Y         the info (default: from the file name)
-  --category C                Movies (default), TV Shows, Shorts, Music Videos
-  --genres G  --desc D        more info
-  --tmdb                      look the info and poster up on TMDB (needs a TMDB token in Studio's settings)
-  --poster FILE|URL           a poster
-  --bitrate KBPS              the moflex video bitrate (default 1400)
-  --out DIR                   where the output goes (default: beside the source)
-  --name NAME                 the output's file name (default: "Title (Year) (3D) (S).moflex")
-  --plain                     a plain moflex (no SUPER MOFLEX info, subtitles or extra audio)
-  --keep-work                 keep the work folder (for looking into a problem)
-  --json                      JSON events instead of plain lines (what the GUI reads)
+Only SOURCE is needed: every option below has a default -- the same choices the window makes for a
+newly opened file -- shown in [brackets].
+
+VIDEO
+  --3d | --2d             what to encode             [3D for a side-by-side source or with --conv3d, else 2D]
+  --source-type T         auto, 2d, hsbs, fsbs       [auto: detected from the picture and file name]
+  --bitrate KBPS          video bitrate              [1400, the official 3D setting]
+  --encoder E             mobiclip or open           [Settings: mobiclip]
+  --version SPEC          another version of the film (repeatable, up to 3)       [none]
+                            FILE[::label=B&W,type=hsbs,audio=2]   (audio = the track it switches to)
+  --main-label NAME       the main version's name in the Version menu             [none]
+
+2D TO 3D (iw3)                                                                    [off]
+  --conv3d [TEMPLATE]     make a 2D source 3D first: best, high, medium, low, or yours   [best]
+  --model MODEL           the depth model                                         [the template's]
+  --iw3 KEY=VALUE         any iw3 setting (repeatable)                            [the template's]
+  --keep-sbs              keep iw3's 3D side-by-side video                        [deleted]
+  --templates             list the templates, models and iw3 settings, then exit
+
+AUDIO (track 1 plays everywhere; tracks 2-8 in the CLOWNSEC player)
+  --audio N               track 1 = the source's audio stream N   [the first English one, else the default]
+  --audio-file FILE[:N]   track 1 from another file                               [no]
+  --audio-offset SECONDS  shift track 1                                           [0]
+  --lang CODE             track 1's language                                      [the stream's, else eng]
+  --normalize             (an existing moflex) fix track 1's loudness             [video sources: always]
+  --add-audio SPEC        another track (repeatable, up to 7): N | FILE[:N] [::label=COM,lang=eng,offset=0.5]
+                                                    [every other audio stream of the source, labelled]
+  --no-extra-audio        only track 1
+
+SUBTITLES (up to 16)
+  --sub SPEC              N | FILE.srt/.ass/.mkv[:N]  [::label=eng,offset=-1.2]   (repeatable)
+                          [every text subtitle in the source, and FILE.xx.srt/.ass beside it]
+  --no-subs               none
+
+INFO                                                     [title, year, season/episode: from the file name]
+  --title T  --year Y  --genres G  --desc D  --runtime MIN  --date YYYY-MM-DD
+  --category C            Movies, TV Shows, Shorts, Music Videos   [Movies; TV Shows for S01E02 names]
+  --season S --episode E --eptitle T --show-desc D                        (a TV episode)
+  --format native|converted                                               [native]
+  --tmdb                  fill the info and poster in from TMDB (no token needed)  [off]
+  --poster FILE|URL       a poster                     [none, or TMDB's with --tmdb]
+  --no-poster             no poster even with --tmdb
+
+OUTPUT
+  -o, --output FILE       the output file              ["Title (Year) (3D) (S).moflex" beside the source]
+  --out DIR  --name NAME  just the folder / just the name
+  --overwrite             replace an existing file     [no: stops instead]
+  --plain                 a plain moflex (no SUPER MOFLEX info, subtitles or extra audio)   [SUPER MOFLEX]
+  --save-job FILE         write the job file instead of running it (edit it, then: run FILE)
+  --keep-work             keep the work folder         [deleted]
+  --json                  JSON events instead of plain lines
+
+A SPEC's options follow "::", e.g.  --sub "C:\\subs\\movie.eng.srt::label=eng,offset=0.5"
 
 Examples:
   moflex-studio make "Ace Ventura (1994).mkv" --conv3d
-  moflex-studio make "Ace Ventura (1994).mkv" --conv3d low --out D:\\3DS
-  moflex-studio make "Avatar (2009) Half SBS.mkv" --3d --source-type hsbs --tmdb
+  moflex-studio make "Avatar (2009) Half SBS.mkv" --tmdb --no-extra-audio
+  moflex-studio make "Show S01E02.mkv" --2d --audio 1 --add-audio 2::label=JPN -o "D:\\3DS\\Show S01E02.moflex"
+  moflex-studio make "Film.mkv" --encoder open --bitrate 1500 --save-job film.json
 """
+
+def _sub_label(lang, title, forced):
+    t = (title or '').lower()
+    if 'sdh' in t or 'hearing' in t:
+        return 'sdh'
+    if forced or 'forced' in t:
+        return 'frc'
+    if 'comment' in t:
+        return 'com'
+    lang = (lang or '').lower()
+    return lang if re.fullmatch(r'[a-z][a-z0-9]{1,2}', lang) and lang != 'und' else 'eng'
+
+def _sidecar_label(f):
+    m = re.search(r'\.([A-Za-z][A-Za-z0-9]{1,2})\.(srt|ass|ssa)$', os.path.basename(f), re.I)
+    if m:
+        return m.group(1).lower()
+    return 'sdh' if re.search('sdh', f, re.I) else 'frc' if re.search('forced', f, re.I) else 'eng'
+
+def default_tracks(info, src):
+    """what the window picks for a newly opened video: track 1 = the first English audio (else the
+    default, else the first); every other audio stream as tracks 2-8; every text subtitle stream and
+    any FILE.*.srt/.ass beside the source"""
+    streams = info.get('audio') or []
+    main = (next((x for x in streams if (x.get('lang') or '').startswith('en')), None)
+            or next((x for x in streams if x.get('default')), None) or (streams[0] if streams else None))
+    aud = {'main': {}, 'extra': []}
+    if main:
+        ml = main.get('lang') or ''
+        aud['main'] = {'file': None, 'stream': main['index'], 'offset': 0.0,
+                       'lang': (ml if ml not in ('', 'und') else 'eng')[:3]}
+        for x in streams:
+            if x is main or len(aud['extra']) >= 7:
+                continue
+            sl, t = (x.get('lang') or '').lower(), (x.get('title') or '').lower()
+            lbl = 'com' if 'comment' in t else sl if re.fullmatch(r'[a-z][a-z0-9]{1,2}', sl) and sl != 'und' else f"a{len(aud['extra']) + 2}"
+            aud['extra'].append({'file': None, 'stream': x['index'], 'offset': 0.0, 'lang': lbl, 'label': lbl})
+    subs = []
+    for x in info.get('subtitles') or []:
+        if x.get('image') or len(subs) >= 16:
+            continue
+        subs.append({'file': None, 'stream': x['index'], 'offset': 0.0,
+                     'label': _sub_label(x.get('lang'), x.get('title'), x.get('forced'))})
+    base = os.path.splitext(src)[0]
+    d = os.path.dirname(src) or '.'
+    for f in sorted(os.listdir(d)):
+        p = os.path.join(d, f)
+        if len(subs) < 16 and p.lower().startswith(base.lower() + '.') and f.lower().endswith(('.srt', '.ass', '.ssa')):
+            subs.append({'file': p, 'offset': 0.0, 'label': _sidecar_label(p)})
+    return aud, subs
+
+def _spec(text):
+    """'FILE[:N][::k=v,k=v]' or 'N[::...]' -> (file or None, stream or None, {k: v})"""
+    body, _, opts = text.partition('::')
+    kv = {}
+    for part in filter(None, opts.split(',')):
+        k, _, v = part.partition('=')
+        kv[k.strip().lower()] = v.strip()
+    if re.fullmatch(r'\d+', body.strip()):
+        return None, int(body), kv
+    m = re.match(r'^(.*?)(?::(\d+))?$', body.strip())
+    f, n = m.group(1), m.group(2)
+    if not os.path.isfile(f):
+        raise RuntimeError(f'no such file: {f}')
+    return os.path.abspath(f), (int(n) if n else None), kv
+
+def _val(v):
+    """an iw3 setting's value from text: numbers, true/false, a list like 3,1"""
+    lv = v.strip().lower()
+    if lv in ('true', 'yes', 'on'):
+        return True
+    if lv in ('false', 'no', 'off'):
+        return False
+    if ',' in v or '/' in v:
+        return [_val(x) for x in re.split(r'[,/]', v)]
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
 
 def make_cmd(argv):
     """the 'make' command: a job from command-line options, then run it"""
@@ -200,18 +323,35 @@ def make_cmd(argv):
     ap.add_argument('--category', default='Movies'); ap.add_argument('--genres'); ap.add_argument('--desc')
     ap.add_argument('--tmdb', action='store_true'); ap.add_argument('--poster')
     ap.add_argument('--bitrate', type=int); ap.add_argument('--out'); ap.add_argument('--name')
+    ap.add_argument('--encoder', choices=['mobiclip', 'open'])
     ap.add_argument('--plain', action='store_true'); ap.add_argument('--keep-work', action='store_true')
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--model'); ap.add_argument('--iw3', action='append', default=[])
+    ap.add_argument('--version', action='append', default=[]); ap.add_argument('--main-label')
+    ap.add_argument('--audio', type=int); ap.add_argument('--audio-file'); ap.add_argument('--audio-offset', type=float)
+    ap.add_argument('--normalize', action='store_true'); ap.add_argument('--lang')
+    ap.add_argument('--add-audio', action='append', default=[]); ap.add_argument('--sub', action='append', default=[])
+    ap.add_argument('--runtime', type=int); ap.add_argument('--date')
+    ap.add_argument('--season', type=int); ap.add_argument('--episode', type=int); ap.add_argument('--eptitle')
+    ap.add_argument('--show-desc'); ap.add_argument('--format', choices=['native', 'converted'])
+    ap.add_argument('--no-poster', action='store_true'); ap.add_argument('-o', '--output')
+    ap.add_argument('--overwrite', action='store_true'); ap.add_argument('--save-job')
+    ap.add_argument('--no-extra-audio', action='store_true'); ap.add_argument('--no-subs', action='store_true')
     ap.add_argument('-h', '--help', action='store_true')
     a = ap.parse_args(argv)
     HUMAN = not a.json
     if a.help or (not a.source and not a.templates):
         print(MAKE_HELP); return
     if a.templates:
+        print('Templates:')
         for k, v in iw3_templates().items():
             c = iw3_settings({'template': k})
             print(f"  {k:<10} {v.get('label', ''):<40} {c['model']}, depth {c['resolution']}, {c['method']}"
                   f"{'' if v.get('builtin') else '  (yours)'}")
+        print('Models (--model):')
+        for m in (iw3_catalog() if iw3_find()[0] else [{'model': k, 'label': v[2], 'mb': v[0], 'have': False} for k, v in IW3_MODEL_FILES.items()]):
+            print(f"  {m['model']:<14} {m['label']:<48} {'downloaded' if m['have'] else str(m['mb']) + ' MB'}")
+        print('iw3 settings (--iw3 KEY=VALUE): ' + ', '.join(k for k in IW3_DEFAULTS if k not in ('keep_sbs',)))
         return
     src = os.path.abspath(a.source)
     if not os.path.isfile(src):
@@ -231,11 +371,104 @@ def make_cmd(argv):
             md.update({k: v for k, v in d.items() if v})
     job = {'source': src, 'source_type': a.source_type, 'metadata': md, 'super': not a.plain,
            'output_dir': os.path.abspath(a.out) if a.out else '', 'keep_work': a.keep_work}
-    if a.conv3d:
-        if a.conv3d not in iw3_templates():
-            raise RuntimeError(f"no 2D-to-3D template '{a.conv3d}' (see --templates)")
-        job['conv3d'] = {'enabled': True, 'template': a.conv3d, 'keep_sbs': a.keep_sbs}
+    if a.conv3d or a.model or a.iw3:
+        tpl = a.conv3d or 'best'
+        if tpl not in iw3_templates():
+            raise RuntimeError(f"no 2D-to-3D template '{tpl}' (see --templates)")
+        job['conv3d'] = {'enabled': True, 'template': tpl, 'keep_sbs': a.keep_sbs}
+        if a.model:
+            if a.model not in IW3_MODELS:
+                raise RuntimeError(f'unknown depth model {a.model} (see --templates)')
+            job['conv3d']['model'] = a.model
+        for kv in a.iw3:
+            k, _, v = kv.partition('=')
+            if k.strip() not in IW3_DEFAULTS:
+                raise RuntimeError(f'unknown iw3 setting {k} (see --templates)')
+            job['conv3d'][k.strip()] = _val(v)
         job['source_type'] = '2d' if a.source_type == 'auto' else a.source_type
+        a.conv3d = tpl
+    # episode info
+    if a.season is not None or a.episode is not None:
+        md['season_episode'] = [a.season or 0, a.episode or 0]
+        if md['category'] == 'Movies':
+            md['category'] = 'TV Shows'
+    for k, v in (('eptitle', a.eptitle), ('showdesc', a.show_desc), ('runtime', a.runtime), ('date', a.date),
+                 ('format', a.format)):
+        if v is not None:
+            md[k] = v
+    # audio: the window's defaults unless told otherwise
+    dflt_aud, dflt_subs = default_tracks(info, src) if info['kind'] == 'video' else ({}, [])
+    aud = {}
+    main = {}
+    if a.normalize and info['kind'] != 'video':     # a video source's track 1 is always normalised
+        main['normalize'] = True
+    if a.audio is not None:
+        main.update({'file': None, 'stream': a.audio})
+    if a.audio_file:
+        f, n, _ = _spec(a.audio_file)
+        main.update({'file': f, 'stream': n if n is not None else 0})
+    if a.audio_offset is not None:
+        main.setdefault('file', None); main['offset'] = a.audio_offset
+    if a.lang:
+        main['lang'] = a.lang
+    if 'file' in main and 'stream' not in main:
+        main['stream'] = next((x['index'] for x in info['audio'] if x.get('default')), info['audio'][0]['index'] if info['audio'] else 0)
+    if main:
+        if 'file' not in main and dflt_aud.get('main'):
+            main = dict(dflt_aud['main'], **main)
+        aud['main'] = main
+    elif dflt_aud.get('main'):
+        aud['main'] = dict(dflt_aud['main'])
+    extra = []
+    for sp in a.add_audio:
+        f, n, kv = _spec(sp)
+        it = {'file': f, 'stream': n if n is not None else 0, 'offset': float(kv.get('offset', 0) or 0)}
+        if kv.get('lang'): it['lang'] = kv['lang']
+        if kv.get('label'): it['label'] = kv['label'][:3].upper()
+        extra.append(it)
+    if not a.add_audio and not a.no_extra_audio:
+        extra = [x for x in dflt_aud.get('extra') or []
+                 if not (aud.get('main', {}).get('file') is None and x['stream'] == aud.get('main', {}).get('stream'))]
+    if extra and not a.no_extra_audio:
+        aud['extra'] = extra
+    if aud:
+        job['audio'] = aud
+    # subtitles
+    subs = []
+    for sp in a.sub:
+        f, n, kv = _spec(sp)
+        it = {'file': f, 'offset': float(kv.get('offset', 0) or 0)}
+        if n is not None:
+            it['stream'] = n
+        lab = kv.get('label')
+        if not lab:
+            src_s = next((x for x in info.get('subtitles') or [] if f is None and x.get('index') == n), None)
+            lab = (src_s or {}).get('lang') or (re.search(r'\.([a-z]{2,3})\.[^.]+$', f or '') or [None, 'sub'])[1]
+        it['label'] = str(lab)[:3].lower()
+        subs.append(it)
+    if not a.sub and not a.no_subs:
+        subs = dflt_subs
+    if subs and not a.no_subs:
+        job['subtitles'] = subs
+    # versions
+    vers = []
+    for sp in a.version:
+        f, _, kv = _spec(sp)
+        row = {'source': f, 'source_type': kv.get('type', 'auto'), 'label': kv.get('label', '')[:7]}
+        if kv.get('audio'):
+            row['default_audio'] = int(kv['audio'])
+        vers.append(row)
+    if vers:
+        job['versions'] = [{'self': True, 'label': (a.main_label or '')[:7]}] + vers
+        job['main_label'] = (a.main_label or '')[:7]
+    # output
+    if a.output:
+        o = os.path.abspath(a.output)
+        job['output_dir'], job['output_name'] = os.path.dirname(o), os.path.splitext(os.path.basename(o))[0]
+    if a.overwrite:
+        job['overwrite'] = True
+    if a.no_poster:
+        job['art'] = 'none'
     if info['kind'] == 'video':
         is3d_src = (job['source_type'] if job['source_type'] != 'auto' else info['video']['detected']) != '2d'
         job['output'] = '2d' if a.out2d else '3d' if (a.out3d or a.conv3d or is3d_src) else '2d'
@@ -243,10 +476,17 @@ def make_cmd(argv):
         job['output'] = '3d' if a.out3d else '2d'
     if a.bitrate:
         job['bitrate'] = a.bitrate
+    if a.encoder:
+        job['encoder'] = a.encoder
     if a.name:
         job['output_name'] = a.name
     if a.poster:
         job['art'] = a.poster
+    if a.save_job:
+        with open(a.save_job, 'w', encoding='utf-8') as f:
+            json.dump(job, f, indent=1, ensure_ascii=False)
+        print(f'wrote {a.save_job} -- run it with: moflex-studio run "{a.save_job}"')
+        return
     fd, jobfile = tempfile.mkstemp(prefix='moflex_job_', suffix='.json')
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(job, f)
@@ -1310,6 +1550,82 @@ def make_moflex(job, avi, work):
         raise RuntimeError('the encoder finished without producing a moflex')
     return out[0]
 
+# ------------------------------------------------------------------ stage 2b: the open encoder
+# Mobipeg-MOFLEX (Oldhimaster1, GPL-2.0) with the clownsec patches -- the encoder Big Top streams with,
+# here for files: it reads the source itself (no lossless AVI), runs on Windows, macOS and Linux, and
+# needs no licence. Its settings are Big Top's (tuned by eye against the official encoder on an Old
+# 3DS), with the slower, finer motion search a file can afford. It picks a quantizer per frame from
+# the frame's brightness and detail rather than hitting a bitrate exactly; the bitrate setting moves
+# that quantizer (1400-1500 kbps is the official 3D class).
+OPEN_ENV = ['MOBI_8X8=1', 'MOBI_8X8_MS=1', 'MOBI_V11_MV_REFINE=1', 'MOBI_V11_MV_PENALTY=0', 'MOBI_SKIP=0',
+            'MOBI_CSPLIT=1', 'MOBI_DZ=3', 'MOBI_INTER4_DZ=1', 'MOBI_P_INTRA_BIAS=200', 'MOBI_SUBME=9',
+            'MOBI_AQ=1']
+
+def open_aq_offset(kbps, is3d):
+    """the per-frame quantizer's offset for a bitrate, each step ~8.5% fewer bits. Calibrated on a
+    1-minute film clip against the official encoder at 1400 kbps (same file size): 3D at offset 6.0,
+    2D (one eye, one encoder) at 0.0"""
+    import math
+    return round((6.0 if is3d else 0.0) + math.log(1400 / max(200, kbps)) / math.log(1.087), 2)
+
+def open_encoder_path():
+    p = S.get('open_encoder') or ''
+    if p and os.path.isfile(p):
+        return p
+    w = shutil.which('moflex-ffmpeg')
+    if w:
+        return w
+    raise RuntimeError('the open moflex encoder (moflex-ffmpeg) is not installed: Settings > Tools')
+
+def make_open_moflex(job, info, layout, work, src=None, stage='moflex'):
+    """the source straight into a video-only moflex with the open encoder (with progress)"""
+    v = info['video']
+    is3d = job['output'] == '3d'
+    num, den = v.get('fps_num') or 24000, v.get('fps_den') or 1001
+    pre = []
+    if num / den > S['max_fps'] + 0.5:
+        den *= 2
+    pre.append(f'fps={num}/{den}')
+    # one eye fitted into 400x240, black bars, the picture on an 8-pixel grid (an edge inside a block
+    # would ring into the bar; the official encoder does the same)
+    def eye(k):
+        return (f'scale=w=iw*sar*{k}:h=ih:flags=lanczos,setsar=1,'
+                'scale=400:240:force_original_aspect_ratio=decrease:force_divisible_by=8:flags=lanczos,'
+                'pad=400:240:floor((ow-iw)/16)*8:floor((oh-ih)/16)*8:black,setsar=1,format=yuv420p')
+    k = 2 if layout == 'hsbs' else 1
+    if is3d:
+        tb = f'settb=expr=1/(2*({num}/{den}))'
+        fc = (f"[0:v:0]{','.join(pre)},split=2[l0][r0];[l0]crop=iw/2:ih:0:0,{eye(k)},{tb},setpts=2*N[l];"
+              f"[r0]crop=iw/2:ih:iw/2:0,{eye(k)},{tb},setpts=2*N+1[r];[l][r]interleave=nb_inputs=2[v]")
+        lay = ['-r', f'{2 * num}/{den}', '-mo_layout', '0', '-mo_interleave_input_double_rate', '1']
+    else:
+        crop = '' if layout == '2d' else 'crop=iw/2:ih:0:0,'
+        fc = f"[0:v:0]{','.join(pre)},{crop}{eye(k)}[v]"
+        lay = ['-r', f'{num}/{den}', '-mo_layout', '6']
+    out = os.path.join(work, 'open.moflex')
+    kbps = int(job.get('bitrate') or 1400)
+    cmd = [open_encoder_path(), '-hide_banner', '-nostdin', '-y', '-v', 'error', '-nostats', '-progress', 'pipe:1',
+           '-i', src or job['source'], '-filter_complex', fc, '-map', '[v]'] + lay + [
+           '-an', '-sn', '-dn', '-c:v', 'mobiclip', '-mobiclip', '1', '-qp', '16', '-mobi_qyx', '0',
+           '-preset', 'medium', '-me_method', 'hex', '-g', '240', '-keyint_min', '48', '-f', 'moflex', out]
+    env = OPEN_ENV + [f'MOBI_AQ_OFFSET={open_aq_offset(kbps, is3d)}'] + (['MOBI_DUAL_EYES=1'] if is3d else [])
+    old = {k2: os.environ.get(k2) for k2 in (e.split('=')[0] for e in env)}
+    os.environ.update(dict(e.split('=', 1) for e in env))
+    try:
+        ffmpeg_progress(cmd, info['duration'], stage)
+    finally:
+        for k2, v2 in old.items():
+            if v2 is None:
+                os.environ.pop(k2, None)
+            else:
+                os.environ[k2] = v2
+    if not os.path.isfile(out) or os.path.getsize(out) == 0:
+        raise RuntimeError('the open encoder finished without producing a moflex')
+    return out
+
+def use_open(job):
+    return (job.get('encoder') or S.get('encoder') or 'mobiclip') == 'open'
+
 # ------------------------------------------------------------------ stage 3: assemble
 def check_label(code):
     code = (code or '').strip().lower()
@@ -1820,6 +2136,12 @@ def encode_versions(job, work, is3d, first_stage, total):
             raise RuntimeError(f'video version {n + off} is 2D but the output is 3D (set its layout to HSBS or FSBS)')
         vj = dict(job, source=v['source'], output='3d' if is3d else '2d')
         wd = os.path.join(work, f'version{n}'); os.makedirs(wd, exist_ok=True)
+        if use_open(job):
+            emit('stage', stage='moflex', index=i, total=total,
+                 text=f"Version {n + off}: encoding {vj['output'].upper()} moflex (open encoder, ~{job.get('bitrate') or 1400} kbps)")
+            out[str(n)] = make_open_moflex(vj, vinfo, layout, wd)
+            i += 1
+            continue
         emit('stage', stage='avi', index=i, total=total, text=f'Version {n + off}: converting to lossless AVI')
         avi = os.path.join(wd, 'moflex_job.avi')
         make_avi(vj, vinfo, layout, avi)
@@ -1863,8 +2185,9 @@ def run_job(jobfile):
             check_fat32(estimate_size(job, info), 'The output would be about')
             check_source_lengths(job, info)
             n_alt = len(versions_to_encode(job))
-            total = 3 + 2 * n_alt + (1 if conv else 0)
-            stages = (['iw3'] if conv else []) + ['avi', 'moflex'] + ['avi', 'moflex'] * n_alt + ['super']
+            per = ['moflex'] if use_open(job) else ['avi', 'moflex']     # the open encoder reads the source itself
+            total = 1 + len(per) * (1 + n_alt) + (1 if conv else 0)
+            stages = (['iw3'] if conv else []) + per + per * n_alt + ['super']
             emit('start', source=src, kind=kind, work=work, layout=layout, output=job['output'], stages=stages,
                  duration=info['duration'])
             pic, vinfo, base = None, info, 1
@@ -1880,21 +2203,28 @@ def run_job(jobfile):
                 vinfo = dict(info, video=probe(pic)['video'])
                 layout, base = 'fsbs', 2
                 job['_sbs'] = pic
-            emit('stage', stage='avi', index=base, total=total, text='Converting to lossless AVI')
-            avi = os.path.join(work, 'moflex_job.avi')
-            make_avi(job, vinfo, layout, avi, src=pic)
-            job['_video_dur'] = avi_secs(avi)
-            if job['_video_dur'] and info['duration'] - job['_video_dur'] > 2 and not job.get('_short_warned'):
-                warn(job, f"the converted video is {clock(job['_video_dur'])} but the source runs {clock(info['duration'])}"
-                          ' -- the picture may be cut short')
-            emit('stage', stage='moflex', index=base + 1, total=total,
-                 text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
-            enc = make_moflex(job, avi, work)
+            if use_open(job):
+                emit('stage', stage='moflex', index=base, total=total,
+                     text=f"Encoding {job['output'].upper()} moflex (open encoder, ~{job.get('bitrate') or 1400} kbps)")
+                enc = make_open_moflex(job, vinfo, layout, work, src=pic)
+                nxt = base + 1
+            else:
+                emit('stage', stage='avi', index=base, total=total, text='Converting to lossless AVI')
+                avi = os.path.join(work, 'moflex_job.avi')
+                make_avi(job, vinfo, layout, avi, src=pic)
+                job['_video_dur'] = avi_secs(avi)
+                if job['_video_dur'] and info['duration'] - job['_video_dur'] > 2 and not job.get('_short_warned'):
+                    warn(job, f"the converted video is {clock(job['_video_dur'])} but the source runs {clock(info['duration'])}"
+                              ' -- the picture may be cut short')
+                emit('stage', stage='moflex', index=base + 1, total=total,
+                     text=f"Encoding {job['output'].upper()} moflex ({job.get('bitrate') or 1400} kbps, 2 passes)")
+                enc = make_moflex(job, avi, work)
+                os.remove(avi)                               # only the encoder needed it
+                nxt = base + 2
             job['_video_only'] = True                        # the encoder got no audio; assemble adds track 1
             job['_duration'] = info['duration']
-            os.remove(avi)                                   # only the encoder needed it
             moflex_in, existing = enc, read_trailer(enc)
-            n_stage = encode_versions(job, work, is3d, base + 2, total)
+            n_stage = encode_versions(job, work, is3d, nxt, total)
         else:
             is3d = (job.get('output') or ('3d' if info['moflex']['is3d'] else '2d')).lower() == '3d'
             n_alt = len(versions_to_encode(job))
