@@ -1432,7 +1432,9 @@ def iw3_args(c):
         a.append('--scene-detect')
     if c.get('preserve_border'):
         a.append('--preserve-screen-border')
-    return a + ['--video-codec', 'libx264', '--crf', str(int(c.get('crf') or 20))]
+    crf = c.get('crf')
+    crf = 20 if crf is None or crf == '' else int(crf)     # 0 is a real choice (lossless), not "unset"
+    return a + ['--video-codec', 'libx264', '--crf', str(crf)]
 
 def iw3_label(c):
     """how a file was converted, kept in its info (conv3d=): so a lower model is always told apart"""
